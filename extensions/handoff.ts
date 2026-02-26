@@ -90,9 +90,79 @@ function findActiveWaveProject(cwd: string): string | null {
 	}
 }
 
+// ── Cleanup ────────────────────────────────────────────────────────
+
+const HANDOFF_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+function findAllHandoffs(cwd: string): { path: string; mtime: number }[] {
+	const results: { path: string; mtime: number }[] = [];
+
+	const piDir = path.join(cwd, ".pi");
+	if (fs.existsSync(piDir)) {
+		for (const f of fs.readdirSync(piDir)) {
+			if (f.startsWith("HANDOFF-") && f.endsWith(".md")) {
+				const p = path.join(piDir, f);
+				try { results.push({ path: p, mtime: fs.statSync(p).mtimeMs }); } catch {}
+			}
+		}
+	}
+
+	const wavesDir = path.join(cwd, ".pi", "waves");
+	if (fs.existsSync(wavesDir)) {
+		try {
+			for (const dir of fs.readdirSync(wavesDir, { withFileTypes: true })) {
+				if (!dir.isDirectory()) continue;
+				const d = path.join(wavesDir, dir.name);
+				for (const f of fs.readdirSync(d)) {
+					if (f.startsWith("HANDOFF-") && f.endsWith(".md")) {
+						const p = path.join(d, f);
+						try { results.push({ path: p, mtime: fs.statSync(p).mtimeMs }); } catch {}
+					}
+				}
+			}
+		} catch {}
+	}
+
+	return results.sort((a, b) => b.mtime - a.mtime);
+}
+
+function cleanupStaleHandoffs(cwd: string): number {
+	const now = Date.now();
+	let removed = 0;
+	for (const h of findAllHandoffs(cwd)) {
+		if (now - h.mtime > HANDOFF_MAX_AGE_MS) {
+			try { fs.unlinkSync(h.path); removed++; } catch {}
+		}
+	}
+	return removed;
+}
+
+function ensureGitignoreHandoffs(cwd: string): void {
+	const gitignore = path.join(cwd, ".gitignore");
+	const pattern = "HANDOFF-*.md";
+	try {
+		if (fs.existsSync(gitignore)) {
+			const content = fs.readFileSync(gitignore, "utf-8");
+			if (content.includes(pattern)) return;
+			fs.appendFileSync(gitignore, `\n# pi handoff files (temporary)\n${pattern}\n`);
+		} else {
+			// Don't create .gitignore if it doesn't exist — might not be a git repo
+		}
+	} catch {}
+}
+
 // ── Extension ──────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+
+	// Cleanup stale handoffs and ensure gitignore on session start
+	pi.on("session_start", async (_event, ctx) => {
+		const removed = cleanupStaleHandoffs(ctx.cwd);
+		if (removed > 0) {
+			ctx.ui.notify(`Cleaned up ${removed} stale handoff file${removed > 1 ? "s" : ""} (>7 days old)`, "info");
+		}
+		ensureGitignoreHandoffs(ctx.cwd);
+	});
 
 	pi.registerCommand("handoff", {
 		description: "Create a handoff file to continue work in a new session",
@@ -213,42 +283,13 @@ export default function (pi: ExtensionAPI) {
 		description: "Continue from a handoff file (e.g. /pickup .pi/HANDOFF-2026-02-26.md)",
 		handler: async (args, ctx) => {
 			if (!args?.trim()) {
-				// Find most recent handoff file
-				const candidates: { path: string; mtime: number }[] = [];
-
-				// Check .pi/ for handoffs
-				const piDir = path.join(ctx.cwd, ".pi");
-				if (fs.existsSync(piDir)) {
-					for (const f of fs.readdirSync(piDir)) {
-						if (f.startsWith("HANDOFF-") && f.endsWith(".md")) {
-							const p = path.join(piDir, f);
-							candidates.push({ path: p, mtime: fs.statSync(p).mtimeMs });
-						}
-					}
-				}
-
-				// Check .pi/waves/*/
-				const wavesDir = path.join(ctx.cwd, ".pi", "waves");
-				if (fs.existsSync(wavesDir)) {
-					for (const dir of fs.readdirSync(wavesDir, { withFileTypes: true })) {
-						if (!dir.isDirectory()) continue;
-						const d = path.join(wavesDir, dir.name);
-						for (const f of fs.readdirSync(d)) {
-							if (f.startsWith("HANDOFF-") && f.endsWith(".md")) {
-								const p = path.join(d, f);
-								candidates.push({ path: p, mtime: fs.statSync(p).mtimeMs });
-							}
-						}
-					}
-				}
+				const candidates = findAllHandoffs(ctx.cwd);
 
 				if (candidates.length === 0) {
 					ctx.ui.notify("No handoff files found. Usage: /pickup <path>", "info");
 					return;
 				}
 
-				// Let user pick
-				candidates.sort((a, b) => b.mtime - a.mtime);
 				const options = candidates.map((c) => path.relative(ctx.cwd, c.path));
 				const choice = await ctx.ui.select("Pick a handoff to continue from:", options);
 				if (!choice) return;
@@ -262,6 +303,14 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const content = fs.readFileSync(filePath, "utf-8");
+
+			// Delete the handoff file — it's been consumed
+			try {
+				fs.unlinkSync(filePath);
+				ctx.ui.notify(`Picked up and deleted: ${path.relative(ctx.cwd, filePath)}`, "info");
+			} catch {
+				ctx.ui.notify(`Picked up: ${path.relative(ctx.cwd, filePath)} (could not delete)`, "info");
+			}
 
 			// Send the handoff content as context for the LLM
 			pi.sendUserMessage(
