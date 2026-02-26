@@ -1,11 +1,12 @@
 {
   "name": "pi-wave-workflow",
-  "version": "1.0.0",
-  "description": "TDD wave-based parallel execution workflow for pi. Scout → Spec → Plan → Execute with test-first waves, file access enforcement, and verification gates.",
+  "version": "2.0.0",
+  "description": "Complete development workflow for pi: TDD wave-based parallel execution, subagent orchestration with git worktree isolation, feature branch workflow, code review, security guidance, and git automation.",
   "keywords": ["pi-package"],
   "license": "MIT",
   "pi": {
     "extensions": ["./extensions"],
-    "prompts": ["./prompts"]
+    "prompts": ["./prompts"],
+    "skills": ["./skills"]
   }
 }
