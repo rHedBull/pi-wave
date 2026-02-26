@@ -279,6 +279,21 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("clear", {
+		description: "Clear conversation context (aggressive compact) to free up space",
+		handler: async (_args, ctx) => {
+			ctx.compact({
+				customInstructions: "Create an extremely brief summary in 3-5 bullet points max. Only keep: what the user is working on, key file paths, and immediate next step. Discard all tool output details, code snippets, and intermediate discussion.",
+				onComplete: () => {
+					ctx.ui.notify("Context cleared.", "info");
+				},
+				onError: (err) => {
+					ctx.ui.notify(`Clear failed: ${err.message}`, "error");
+				},
+			});
+		},
+	});
+
 	pi.registerCommand("pickup", {
 		description: "Continue from a handoff file (e.g. /pickup .pi/HANDOFF-2026-02-26.md)",
 		handler: async (args, ctx) => {
