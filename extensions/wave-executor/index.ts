@@ -608,6 +608,58 @@ export default function (pi: ExtensionAPI) {
 			{
 				questions: [
 					{
+						id: "integration_strategy",
+						prompt: "How should this integrate with the existing codebase?",
+						options: [
+							{ label: "Extend existing code — add to current modules/classes" },
+							{ label: "New module that plugs into existing interfaces" },
+							{ label: "Replace/rewrite existing implementation entirely" },
+							{ label: "Adapter/wrapper around existing code" },
+							{ label: "Greenfield — no existing code to integrate with" },
+						],
+						allowCustom: true,
+					},
+					{
+						id: "integration_points",
+						prompt: "Where are the key integration points? (scout will have proposed some)",
+						options: [
+							{ label: "Use the integration points the scout identified" },
+							{ label: "I'll specify exact files/interfaces to hook into" },
+							{ label: "Need to discover — explore the codebase first" },
+						],
+						allowCustom: true,
+					},
+				],
+			},
+			{
+				questions: [
+					{
+						id: "legacy_support",
+						prompt: "Legacy code / backward compatibility stance?",
+						options: [
+							{ label: "Must preserve all existing behavior — extend only" },
+							{ label: "Can deprecate old paths with migration period" },
+							{ label: "Replace entirely — old code can be removed" },
+							{ label: "Strangler fig — run old and new side by side, migrate gradually" },
+							{ label: "No legacy concerns — this is new" },
+						],
+						allowCustom: true,
+					},
+					{
+						id: "legacy_cleanup",
+						prompt: "Should we clean up / simplify related existing code while we're at it?",
+						options: [
+							{ label: "Yes — refactor adjacent code if it simplifies integration" },
+							{ label: "Minimal — only change what's strictly needed" },
+							{ label: "No — don't touch anything outside the new feature scope" },
+						],
+						allowCustom: true,
+					},
+				],
+			},
+			{
+				questions: [
+					{
 						id: "scale",
 						prompt: "Expected scale/load?",
 						options: [
@@ -640,8 +692,8 @@ export default function (pi: ExtensionAPI) {
 							{ label: "Auth/authorization changes needed" },
 							{ label: "Input validation / data sanitization" },
 							{ label: "Data exposure / privacy concerns" },
+							{ label: "Rate limiting / abuse prevention needed" },
 							{ label: "Standard security practices sufficient" },
-							{ label: "Not security-relevant" },
 						],
 						allowCustom: true,
 					},
@@ -660,6 +712,95 @@ export default function (pi: ExtensionAPI) {
 			{
 				questions: [
 					{
+						id: "error_handling",
+						prompt: "Error handling strategy?",
+						options: [
+							{ label: "Typed error hierarchy with error codes" },
+							{ label: "Structured error responses (code, message, details)" },
+							{ label: "Match existing error patterns in the codebase" },
+							{ label: "Basic try/catch with logging" },
+						],
+						allowCustom: true,
+					},
+					{
+						id: "api_versioning",
+						prompt: "API versioning approach?",
+						options: [
+							{ label: "URL path versioning (e.g. /v1/, /v2/)" },
+							{ label: "Header-based versioning" },
+							{ label: "No versioning needed — internal only" },
+							{ label: "Follow existing API versioning pattern" },
+						],
+						allowCustom: true,
+					},
+				],
+			},
+			{
+				questions: [
+					{
+						id: "logging",
+						prompt: "Logging & monitoring approach?",
+						options: [
+							{ label: "Structured logging (JSON) with log levels and correlation IDs" },
+							{ label: "Structured logging with metrics/health endpoints" },
+							{ label: "Match existing logging patterns" },
+							{ label: "Minimal — errors and warnings only" },
+						],
+						allowCustom: true,
+					},
+					{
+						id: "monitoring",
+						prompt: "Monitoring & observability needs?",
+						options: [
+							{ label: "Health checks + metrics endpoints + alerting rules" },
+							{ label: "Health checks + basic metrics" },
+							{ label: "Log-based monitoring only" },
+							{ label: "Not needed for this change" },
+						],
+						allowCustom: false,
+					},
+				],
+			},
+			{
+				questions: [
+					{
+						id: "cicd",
+						prompt: "CI/CD & deployment considerations?",
+						options: [
+							{ label: "Full pipeline — lint, test, build, stage, deploy with rollback" },
+							{ label: "Add to existing CI pipeline (tests + build)" },
+							{ label: "Feature flags for gradual rollout" },
+							{ label: "No CI/CD changes needed" },
+						],
+						allowCustom: true,
+					},
+					{
+						id: "documentation",
+						prompt: "Documentation requirements?",
+						options: [
+							{ label: "Full docs — API reference, architecture decision record, runbook" },
+							{ label: "API docs + inline code documentation" },
+							{ label: "README updates + inline comments" },
+							{ label: "Code comments only" },
+						],
+						allowCustom: true,
+					},
+				],
+			},
+			{
+				questions: [
+					{
+						id: "scalability",
+						prompt: "Scalability outlook?",
+						options: [
+							{ label: "Design for horizontal scaling from the start" },
+							{ label: "Identify bottlenecks + document scaling plan for later" },
+							{ label: "Stateless design, scale-ready but no immediate plan" },
+							{ label: "Not a concern for this scope" },
+						],
+						allowCustom: true,
+					},
+					{
 						id: "compatibility",
 						prompt: "Backward compatibility / migration?",
 						options: [
@@ -668,17 +809,6 @@ export default function (pi: ExtensionAPI) {
 							{ label: "Greenfield — no compatibility concerns" },
 						],
 						allowCustom: true,
-					},
-					{
-						id: "observability",
-						prompt: "Logging / observability needs?",
-						options: [
-							{ label: "Add structured logging for key operations" },
-							{ label: "Match existing logging patterns" },
-							{ label: "Minimal — errors only" },
-							{ label: "Not needed" },
-						],
-						allowCustom: false,
 					},
 				],
 			},
@@ -760,7 +890,10 @@ export default function (pi: ExtensionAPI) {
 			// Phase 1: Scout
 			ctx.ui.setStatus("waves", ctx.ui.theme.fg("warning", `🔍 [${projectName}] Scouting...`));
 			const scoutDepth = scope === "hack" ? "Quick" : scope === "enterprise" ? "Thorough" : "Medium";
-			const scoutResult = await runSubagent("scout", `${scoutDepth} investigation: ${query}`, ctx.cwd, undefined, { readOnly: true, safeBashOnly: true });
+			const enterpriseExtra = scope === "enterprise"
+				? `\n\nIMPORTANT — Enterprise mode: In addition to standard scouting, you MUST also:\n- Identify and propose specific integration points: exact files, functions, interfaces, and classes where new code should hook into existing code\n- Map the dependency graph around the affected area: what depends on this code, what does it depend on\n- Flag legacy code that may need replacing, wrapping, or deprecating\n- Note existing abstractions/interfaces that new code should implement or extend\n- Include a section "## Proposed Integration Points" in your output listing each point with file path, function/class, and how to integrate`
+				: "";
+			const scoutResult = await runSubagent("scout", `${scoutDepth} investigation: ${query}${enterpriseExtra}`, ctx.cwd, undefined, { readOnly: true, safeBashOnly: true });
 			const scoutOutput = extractFinalOutput(scoutResult.stdout);
 
 			if (scoutResult.exitCode !== 0 || !scoutOutput) {

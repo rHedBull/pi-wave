@@ -121,4 +121,15 @@ Brief description of the testing strategy: framework, patterns, directory struct
 7. Final wave: run the entire test suite, check integration across all layers
 8. Write the plan to the specified output file
 
+### Integration & Legacy Awareness
+
+If the spec contains an **Integration Strategy** section:
+- Plan integration point work as its own wave(s) — don't bury it inside feature waves
+- If the approach is **extend**: first wave should add tests for existing behavior at integration points (safety net), then extend
+- If the approach is **replace/rewrite**: plan a deprecation wave — adapter/shim first, then new implementation, then switchover, then cleanup
+- If the approach is **strangler fig**: plan parallel implementation waves, a switchover wave (feature flag or config), and a legacy removal wave
+- If **legacy cleanup** is in scope: plan it as a separate wave AFTER the feature is verified working — never mix cleanup with feature work
+- Integration tests between new and existing code get their own dedicated wave
+- Include a task that verifies existing tests still pass after integration (regression check)
+
 Aim for many tasks — 30, 50, 100+ for large features. Each test file and implementation file gets its own task.
