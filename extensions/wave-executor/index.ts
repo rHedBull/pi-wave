@@ -216,8 +216,11 @@ function runSubagent(
 	return new Promise((resolve) => {
 		const args = ["--mode", "json", "-p", "--no-session"];
 
+		// Resolve package root for bundled resources
+		const packageRoot = path.join(__dirname, "..", "..");
+
 		// Look for agent definitions: first in package dir, then in global agents dir
-		const packageAgentsDir = path.join(__dirname, "..", "..", "agents");
+		const packageAgentsDir = path.join(packageRoot, "agents");
 		const globalAgentsDir = path.join(os.homedir(), ".pi", "agent", "agents");
 		const agentFile = fs.existsSync(path.join(packageAgentsDir, `${agentName}.md`))
 			? path.join(packageAgentsDir, `${agentName}.md`)
@@ -472,21 +475,292 @@ export default function (pi: ExtensionAPI) {
 
 	// ── /spec ────────────────────────────────────────────────────────
 
+	const SCOPES = ["hack", "standard", "enterprise"] as const;
+	type Scope = (typeof SCOPES)[number];
+
+	function parseSpecArgs(args: string): { scope: Scope; query: string } | null {
+		const trimmed = args.trim();
+		if (!trimmed) return null;
+		const firstWord = trimmed.split(/\s+/)[0].toLowerCase();
+		if (SCOPES.includes(firstWord as Scope)) {
+			const query = trimmed.slice(firstWord.length).trim();
+			return query ? { scope: firstWord as Scope, query } : null;
+		}
+		return { scope: "standard", query: trimmed };
+	}
+
+	interface ScopeConfig {
+		emoji: string;
+		label: string;
+		specAgent: string;
+		scoutDepth: string;
+		interviewRounds: { questions: InterviewQuestion[] }[];
+	}
+
+	interface InterviewQuestion {
+		id: string;
+		prompt: string;
+		options: { label: string; description?: string }[];
+		allowCustom: boolean;
+		condition?: (answers: Map<string, string>) => boolean;
+	}
+
+	function buildInterviewRounds(scope: Scope, scoutContext: string): { questions: InterviewQuestion[] }[] {
+		if (scope === "hack") {
+			return [{
+				questions: [
+					{
+						id: "approach",
+						prompt: "Which approach do you prefer?",
+						options: [
+							{ label: "Quickest path — minimal changes", description: "Just get it working" },
+							{ label: "Slightly cleaner — basic structure", description: "A bit more thought, still fast" },
+						],
+						allowCustom: true,
+					},
+				],
+			}];
+		}
+
+		if (scope === "standard") {
+			return [
+				{
+					questions: [
+						{
+							id: "goal",
+							prompt: "What's the main goal? (pick closest or type your own)",
+							options: [
+								{ label: "Add a new feature" },
+								{ label: "Refactor / improve existing code" },
+								{ label: "Fix a bug or issue" },
+								{ label: "Performance improvement" },
+							],
+							allowCustom: true,
+						},
+						{
+							id: "scope",
+							prompt: "How far should this go?",
+							options: [
+								{ label: "Minimal — just the core change", description: "No extras" },
+								{ label: "Moderate — include related cleanups", description: "Fix things along the way" },
+								{ label: "Thorough — update tests, docs, related code", description: "Do it properly" },
+							],
+							allowCustom: false,
+						},
+					],
+				},
+				{
+					questions: [
+						{
+							id: "patterns",
+							prompt: "Any specific patterns or conventions to follow?",
+							options: [
+								{ label: "Follow existing patterns in the codebase" },
+								{ label: "I have specific preferences (I'll type them)" },
+								{ label: "No preference — use best judgment" },
+							],
+							allowCustom: true,
+						},
+						{
+							id: "testing",
+							prompt: "Testing approach?",
+							options: [
+								{ label: "Match existing test patterns" },
+								{ label: "Add comprehensive tests" },
+								{ label: "Minimal tests — just critical paths" },
+								{ label: "No tests needed" },
+							],
+							allowCustom: false,
+						},
+					],
+				},
+			];
+		}
+
+		// enterprise
+		return [
+			{
+				questions: [
+					{
+						id: "problem",
+						prompt: "What problem does this solve? (describe in your own words or pick)",
+						options: [
+							{ label: "New capability the system doesn't have" },
+							{ label: "Replacing/upgrading an existing solution" },
+							{ label: "Addressing technical debt or scalability" },
+							{ label: "Security or compliance requirement" },
+						],
+						allowCustom: true,
+					},
+					{
+						id: "users",
+						prompt: "Who are the users/consumers?",
+						options: [
+							{ label: "End users (via UI)" },
+							{ label: "Other developers (via API)" },
+							{ label: "Internal systems (via integration)" },
+							{ label: "All of the above" },
+						],
+						allowCustom: true,
+					},
+				],
+			},
+			{
+				questions: [
+					{
+						id: "scale",
+						prompt: "Expected scale/load?",
+						options: [
+							{ label: "Low — internal tool, handful of users" },
+							{ label: "Medium — production, moderate traffic" },
+							{ label: "High — high throughput, latency-sensitive" },
+							{ label: "Not applicable" },
+						],
+						allowCustom: false,
+					},
+					{
+						id: "constraints",
+						prompt: "Any hard constraints?",
+						options: [
+							{ label: "Must be backward compatible" },
+							{ label: "Specific deadline or release target" },
+							{ label: "Must work with specific dependencies/versions" },
+							{ label: "No major constraints" },
+						],
+						allowCustom: true,
+					},
+				],
+			},
+			{
+				questions: [
+					{
+						id: "security",
+						prompt: "Security considerations?",
+						options: [
+							{ label: "Auth/authorization changes needed" },
+							{ label: "Input validation / data sanitization" },
+							{ label: "Data exposure / privacy concerns" },
+							{ label: "Standard security practices sufficient" },
+							{ label: "Not security-relevant" },
+						],
+						allowCustom: true,
+					},
+					{
+						id: "testing",
+						prompt: "Testing strategy?",
+						options: [
+							{ label: "Full TDD — unit + integration + E2E" },
+							{ label: "Unit + integration tests" },
+							{ label: "Match existing test coverage patterns" },
+						],
+						allowCustom: true,
+					},
+				],
+			},
+			{
+				questions: [
+					{
+						id: "compatibility",
+						prompt: "Backward compatibility / migration?",
+						options: [
+							{ label: "Must be fully backward compatible" },
+							{ label: "Breaking changes OK with migration path" },
+							{ label: "Greenfield — no compatibility concerns" },
+						],
+						allowCustom: true,
+					},
+					{
+						id: "observability",
+						prompt: "Logging / observability needs?",
+						options: [
+							{ label: "Add structured logging for key operations" },
+							{ label: "Match existing logging patterns" },
+							{ label: "Minimal — errors only" },
+							{ label: "Not needed" },
+						],
+						allowCustom: false,
+					},
+				],
+			},
+		];
+	}
+
+	async function runInterview(
+		ctx: ExtensionContext,
+		scope: Scope,
+		scoutContext: string,
+	): Promise<Map<string, string> | null> {
+		const answers = new Map<string, string>();
+		const rounds = buildInterviewRounds(scope, scoutContext);
+
+		for (let ri = 0; ri < rounds.length; ri++) {
+			const round = rounds[ri];
+			const questions = round.questions.filter((q) => !q.condition || q.condition(answers));
+			if (questions.length === 0) continue;
+
+			for (const question of questions) {
+				const options = question.options.map((o) => o.label);
+				if (question.allowCustom) options.push("Let me type my own answer...");
+
+				const choice = await ctx.ui.select(question.prompt, options);
+				if (choice === undefined) return null; // cancelled
+
+				if (choice === "Let me type my own answer...") {
+					const custom = await ctx.ui.input(question.prompt);
+					if (custom === undefined) return null;
+					answers.set(question.id, custom || "(no answer)");
+				} else {
+					answers.set(question.id, choice);
+				}
+			}
+		}
+
+		// Enterprise: final confirmation
+		if (scope === "enterprise" && answers.size > 0) {
+			let summary = "Here's what I gathered:\n\n";
+			for (const [id, answer] of answers) {
+				summary += `• **${id}**: ${answer}\n`;
+			}
+			const ok = await ctx.ui.confirm("Does this capture everything?", summary);
+			if (!ok) {
+				const extra = await ctx.ui.input("What's missing or needs clarification?");
+				if (extra) answers.set("additional_notes", extra);
+			}
+		}
+
+		return answers;
+	}
+
 	pi.registerCommand("spec", {
-		description: "Scout the codebase and create a named SPEC.md (e.g. /spec add OAuth2 support)",
+		description: "Create a spec: /spec [hack|standard|enterprise] <task> (default: standard)",
 		handler: async (args, ctx) => {
-			if (!args?.trim()) {
-				ctx.ui.notify("Usage: /spec <what you want to build/change>", "error");
+			const parsed = parseSpecArgs(args || "");
+			if (!parsed) {
+				ctx.ui.notify(
+					"Usage: /spec [scope] <task>\n\n" +
+					"Scopes:\n" +
+					"  hack        — quick & dirty, 1-2 questions, minimal spec\n" +
+					"  standard    — balanced, 3-6 questions, solid requirements (default)\n" +
+					"  enterprise  — thorough, multi-round interview, full E2E coverage\n\n" +
+					"Examples:\n" +
+					"  /spec hack add a debug flag\n" +
+					"  /spec add OAuth2 support\n" +
+					"  /spec enterprise redesign the auth module",
+					"info",
+				);
 				return;
 			}
 
-			const query = args.trim();
+			const { scope, query } = parsed;
+			const scopeEmoji = scope === "hack" ? "⚡" : scope === "enterprise" ? "🏢" : "📋";
+			const specAgent = `spec-writer-${scope}`;
 			const projectName = slugify(query);
 			ensureProjectDir(ctx.cwd, projectName);
 
 			// Phase 1: Scout
 			ctx.ui.setStatus("waves", ctx.ui.theme.fg("warning", `🔍 [${projectName}] Scouting...`));
-			const scoutResult = await runSubagent("scout", query, ctx.cwd, undefined, { readOnly: true, safeBashOnly: true });
+			const scoutDepth = scope === "hack" ? "Quick" : scope === "enterprise" ? "Thorough" : "Medium";
+			const scoutResult = await runSubagent("scout", `${scoutDepth} investigation: ${query}`, ctx.cwd, undefined, { readOnly: true, safeBashOnly: true });
 			const scoutOutput = extractFinalOutput(scoutResult.stdout);
 
 			if (scoutResult.exitCode !== 0 || !scoutOutput) {
@@ -494,23 +768,43 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("Scout failed: " + (scoutResult.stderr || "no output"), "error");
 				return;
 			}
+			ctx.ui.setStatus("waves", undefined);
 
-			// Phase 2: Write spec
-			ctx.ui.setStatus("waves", ctx.ui.theme.fg("warning", `📝 [${projectName}] Writing SPEC.md...`));
+			// Phase 2: Interactive interview (runs in main process with full UI)
+			ctx.ui.notify(`${scopeEmoji} Starting ${scope} interview...`, "info");
+			const answers = await runInterview(ctx, scope, scoutOutput);
+
+			if (!answers) {
+				ctx.ui.notify("Interview cancelled.", "info");
+				return;
+			}
+
+			// Format answers for spec writer
+			let interviewSection = "";
+			if (answers.size > 0) {
+				interviewSection = "\n\nUser interview answers:\n";
+				for (const [id, answer] of answers) {
+					interviewSection += `- ${id}: ${answer}\n`;
+				}
+			}
+
+			// Phase 3: Write spec (non-interactive sub-agent, gets scout context + interview answers)
+			ctx.ui.setStatus("waves", ctx.ui.theme.fg("warning", `${scopeEmoji} [${projectName}] Writing SPEC.md (${scope})...`));
 			const file = specPath(ctx.cwd, projectName);
 			const relFile = path.relative(ctx.cwd, file);
 
-			const specTask = `Write a detailed specification for: "${query}"
+			const specTask = `Scope level: ${scope.toUpperCase()}
+Task: "${query}"
 
 Codebase context from scout:
 ${scoutOutput}
-
+${interviewSection}
 IMPORTANT: Write the specification directly to the file \`${relFile}\`.
 Use the write tool to create the file. You can read it back to verify.`;
 
-			const specResult = await runSubagent("spec-writer", specTask, ctx.cwd, undefined, {
+			const specResult = await runSubagent(specAgent, specTask, ctx.cwd, undefined, {
 				allowWrite: [file],
-				safeBashOnly: true,
+				safeBashOnly: scope !== "enterprise",
 			});
 
 			ctx.ui.setStatus("waves", undefined);
@@ -529,7 +823,7 @@ Use the write tool to create the file. You can read it back to verify.`;
 			pi.sendMessage(
 				{
 					customType: "wave-spec",
-					content: `📄 **${projectName}/SPEC.md** created → \`${relFile}\`\n\nReview and edit the spec, then run \`/plan ${projectName}\` to create the implementation plan.\n\n---\n\n${specContent.slice(0, 3000)}${specContent.length > 3000 ? "\n\n*(truncated — see full file)*" : ""}`,
+					content: `${scopeEmoji} **${projectName}/SPEC.md** [${scope}] → \`${relFile}\`\n\nReview and edit the spec, then run \`/plan ${projectName}\` to create the implementation plan.\n\n---\n\n${specContent.slice(0, 3000)}${specContent.length > 3000 ? "\n\n*(truncated — see full file)*" : ""}`,
 					display: true,
 				},
 				{ triggerTurn: false },
