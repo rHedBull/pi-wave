@@ -96,6 +96,39 @@ Edit `agents/*.md` to change models, tools, or system prompts.
 | `/waves <task>` | Shorthand for `/spec <task>` |
 | `/waves-plan <task>` | Shorthand for `/spec <task>` (plan only) |
 
+## WIP & Ideas (Project Memory)
+
+Persistent project memory that shows up when you start pi:
+
+```
+▶ WIP: Implementing OAuth token refresh logic (3 days ago)
+💡 5 ideas: Add rate limiting · Refactor auth middleware · +3 more
+```
+
+### Work in Progress
+
+```bash
+/wip                          # Show current WIP
+/wip refactoring the auth module  # Set WIP (asks for optional context)
+/wip clear                    # Done / switching context
+/wip next                     # Pick an idea from backlog → WIP
+```
+
+WIP is stored in `.pi/WIP.md` — gitignored by default (it's personal, short-term context).
+
+### Ideas & Backlog
+
+```bash
+/ideas                        # Show all ideas
+/ideas add rate limiting for API endpoints  # Add an idea
+/ideas add improve caching #performance     # With tags
+/ideas done 3                 # Remove idea #3 (done)
+/ideas promote 2              # Move idea #2 → WIP
+/ideas edit                   # Edit full backlog in editor
+```
+
+Ideas are stored in `.pi/IDEAS.md` — gitignored by default. If you want to share the backlog with your team, remove `IDEAS.md` from `.gitignore` and commit it.
+
 ## Handoff (Context Running Out)
 
 When context is getting full or you need to switch sessions:
