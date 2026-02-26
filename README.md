@@ -96,6 +96,28 @@ Edit `agents/*.md` to change models, tools, or system prompts.
 | `/waves <task>` | Shorthand for `/spec <task>` |
 | `/waves-plan <task>` | Shorthand for `/spec <task>` (plan only) |
 
+## Handoff (Context Running Out)
+
+When context is getting full or you need to switch sessions:
+
+```bash
+/handoff              # Interactive — asks status + next steps, writes HANDOFF.md
+```
+
+Picks up in a new session:
+
+```bash
+/pickup               # Shows recent handoffs, pick one
+/pickup .pi/waves/add-oauth2-support/HANDOFF-2026-02-26T14-30-00.md
+```
+
+The handoff file captures:
+- Current status (in progress / blocked / partial / exploring)
+- Your description of next steps
+- Files modified and key files read
+- Recent conversation context
+- Active wave project reference (SPEC.md, PLAN.md, EXECUTION.md)
+
 ## Configuration
 
 Edit `extensions/wave-executor/index.ts` to change:
