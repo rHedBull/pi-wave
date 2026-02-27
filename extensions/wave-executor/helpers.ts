@@ -282,6 +282,15 @@ export function listWaveProjects(cwd: string): string[] {
 	return [...names].sort();
 }
 
+/**
+ * Extract the spec file reference from a plan's Markdown content.
+ * Plans contain a `## Reference` section with `- Spec: \`path\``.
+ */
+export function extractSpecRef(planContent: string): string | null {
+	const match = planContent.match(/[-*]\s*Spec:\s*`([^`]+)`/i);
+	return match ? match[1] : null;
+}
+
 // ── File Access Enforcement ────────────────────────────────────────
 
 export function generateEnforcementExtension(rules: FileAccessRules): string {

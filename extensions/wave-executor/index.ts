@@ -18,6 +18,7 @@ import { validateDAG } from "./dag.js";
 import {
 	ensureProjectDir,
 	extractFinalOutput,
+	extractSpecRef,
 	extractSpecSections,
 	findPlanFile,
 	findSpecFile,
@@ -484,46 +485,69 @@ Do NOT write any files. Just output the outline as your response.`;
 	// ── /waves-execute ───────────────────────────────────────────────
 
 	pi.registerCommand("waves-execute", {
-		description: "Execute a wave project's PLAN.md (e.g. /waves-execute project-name)",
+		description: "Execute a plan file (e.g. /waves-execute docs/plan/my-project/my-project-plan-2026-02-27_18-30.md)",
 		handler: async (args, ctx) => {
 			if (!args?.trim()) {
 				const projects = listWaveProjects(ctx.cwd);
-				const ready = projects.filter((p) =>
-					findSpecFile(ctx.cwd, p) && !!findPlanFile(ctx.cwd, p)
-				);
+				const ready = projects.filter((p) => !!findPlanFile(ctx.cwd, p));
 				if (ready.length > 0) {
-					ctx.ui.notify(`Usage: /waves-execute <name>\nReady to execute: ${ready.join(", ")}`, "info");
+					// Show actual plan files, not just project names
+					const planFiles: string[] = [];
+					for (const p of ready) {
+						const pf = findPlanFile(ctx.cwd, p);
+						if (pf) planFiles.push(path.relative(ctx.cwd, pf));
+					}
+					ctx.ui.notify(`Usage: /waves-execute <plan-file-or-project>\n\nReady to execute:\n${planFiles.map((f) => `  ${f}`).join("\n")}`, "info");
 				} else {
-					ctx.ui.notify("No projects ready. Run /waves-spec then /waves-plan first.", "info");
+					ctx.ui.notify("No plan files found. Run /waves-plan first.", "info");
 				}
 				return;
 			}
 
-			const projectName = resolveProject(ctx.cwd, args.trim());
-			const spec = findSpecFile(ctx.cwd, projectName);
-			const planFile = findPlanFile(ctx.cwd, projectName);
+			// Resolve the plan file — accept a direct path or a project name
+			let planFile: string | null = null;
+			let projectName: string;
+			const input = args.trim();
 
-			if (!spec) {
+			// 1. Try as a direct file path
+			const asPath = path.resolve(ctx.cwd, input);
+			if (fs.existsSync(asPath) && fs.statSync(asPath).isFile()) {
+				planFile = asPath;
+				projectName = projectSlug(path.basename(asPath));
+			} else {
+				// 2. Try as a project name
+				projectName = resolveProject(ctx.cwd, input);
+				planFile = findPlanFile(ctx.cwd, projectName);
+			}
+
+			if (!planFile) {
 				const projects = listWaveProjects(ctx.cwd);
 				const hint = projects.length > 0
 					? `\nKnown projects: ${projects.join(", ")}`
 					: "";
-				ctx.ui.notify(`No spec file found for "${args.trim()}" (resolved to "${projectName}").${hint}`, "error");
-				return;
-			}
-			if (!planFile) {
-				ctx.ui.notify(`No plan file found for "${projectName}". Run /waves-plan ${projectName} first.`, "error");
+				ctx.ui.notify(`No plan file found for "${input}".${hint}`, "error");
 				return;
 			}
 
-			const specContent = fs.readFileSync(spec, "utf-8");
 			const planContent = fs.readFileSync(planFile, "utf-8");
 			const plan = parsePlanV2(planContent);
 
 			if (plan.waves.length === 0) {
-				ctx.ui.notify("PLAN.md has no waves. Check the format or run /waves-plan again.", "error");
+				ctx.ui.notify(`Plan has no waves: ${path.relative(ctx.cwd, planFile)}`, "error");
 				return;
 			}
+
+			// Find spec: from the plan's ## Reference section, then by project name
+			const specRef = extractSpecRef(planContent);
+			let spec: string | null = null;
+			if (specRef) {
+				spec = findSpecFile(ctx.cwd, specRef);
+			}
+			if (!spec) {
+				spec = findSpecFile(ctx.cwd, projectName);
+			}
+			// Spec is optional — execution can proceed with empty spec context
+			const specContent = spec ? fs.readFileSync(spec, "utf-8") : "";
 
 			// Validate all DAGs
 			for (const wave of plan.waves) {
@@ -600,19 +624,21 @@ Do NOT write any files. Just output the outline as your response.`;
 
 			// Execution log
 			const logPath = logFilePath(ctx.cwd, projectName);
+			const relPlanFile = path.relative(ctx.cwd, planFile);
+			const relSpecFile = spec ? path.relative(ctx.cwd, spec) : "(none)";
 			const logLines: string[] = [
 				`# Execution Log`,
 				``,
 				`Started: ${new Date().toISOString()}`,
-				`Spec: SPEC.md`,
-				`Plan: PLAN.md`,
+				`Spec: ${relSpecFile}`,
+				`Plan: ${relPlanFile}`,
 				`Architecture: feature-parallel DAG`,
 				``,
 			];
 			const writeLog = () => fs.writeFileSync(logPath, logLines.join("\n"), "utf-8");
 
-			// Protected paths
-			const protectedPaths = [spec, planFile];
+			// Protected paths — don't let agents modify the spec or plan during execution
+			const protectedPaths = [planFile, ...(spec ? [spec] : [])];
 
 			for (let wi = 0; wi < plan.waves.length; wi++) {
 				const wave = plan.waves[wi];
