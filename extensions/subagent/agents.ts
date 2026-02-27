@@ -13,6 +13,7 @@ export interface AgentConfig {
 	description: string;
 	tools?: string[];
 	model?: string;
+	permissionMode?: string;
 	systemPrompt: string;
 	source: "user" | "project";
 	filePath: string;
@@ -65,6 +66,7 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 			description: frontmatter.description,
 			tools: tools && tools.length > 0 ? tools : undefined,
 			model: frontmatter.model,
+			permissionMode: frontmatter.permissionMode,
 			systemPrompt: body,
 			source,
 			filePath,
