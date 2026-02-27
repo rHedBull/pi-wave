@@ -19,6 +19,7 @@ import {
 	ensureProjectDir,
 	extractFinalOutput,
 	extractSpecSections,
+	findPlanFile,
 	findSpecFile,
 	listWaveProjects,
 	logFilePath,
@@ -53,8 +54,8 @@ export default function (pi: ExtensionAPI) {
 			let summary = `**Wave projects** in \`docs/spec/\` and \`docs/plan/\`:\n\n`;
 			for (const name of projects) {
 				const hasSpec = !!findSpecFile(ctx.cwd, name);
-				const hasPlan = fs.existsSync(planPath(ctx.cwd, name));
-				const hasLog = fs.existsSync(logFilePath(ctx.cwd, name));
+				const hasPlan = !!findPlanFile(ctx.cwd, name);
+				const hasLog = false; // execution logs are in the plan dir, covered by hasPlan
 				const icons = [
 					hasSpec ? "📄 SPEC" : null,
 					hasPlan ? "📋 PLAN" : null,
@@ -296,7 +297,7 @@ Now, start by presenting the scout findings and asking your first question.`;
 				} else {
 					const projects = listWaveProjects(ctx.cwd);
 					const ready = projects.filter((p) =>
-						findSpecFile(ctx.cwd, p) && !fs.existsSync(planPath(ctx.cwd, p))
+						findSpecFile(ctx.cwd, p) && !findPlanFile(ctx.cwd, p)
 					);
 					if (ready.length > 0) {
 						ctx.ui.notify(`Usage: /waves-plan <name-or-file>\nReady for planning: ${ready.join(", ")}`, "info");
@@ -418,7 +419,7 @@ You can read it back to verify the format is correct.`;
 			if (!args?.trim()) {
 				const projects = listWaveProjects(ctx.cwd);
 				const ready = projects.filter((p) =>
-					findSpecFile(ctx.cwd, p) && fs.existsSync(planPath(ctx.cwd, p))
+					findSpecFile(ctx.cwd, p) && !!findPlanFile(ctx.cwd, p)
 				);
 				if (ready.length > 0) {
 					ctx.ui.notify(`Usage: /waves-execute <name>\nReady to execute: ${ready.join(", ")}`, "info");
@@ -430,14 +431,14 @@ You can read it back to verify the format is correct.`;
 
 			const projectName = slugify(args.trim());
 			const spec = findSpecFile(ctx.cwd, projectName);
-			const planFile = planPath(ctx.cwd, projectName);
+			const planFile = findPlanFile(ctx.cwd, projectName);
 
 			if (!spec) {
 				ctx.ui.notify(`No spec file found for "${projectName}". Run /waves-spec <task> first.`, "error");
 				return;
 			}
-			if (!fs.existsSync(planFile)) {
-				ctx.ui.notify(`No PLAN.md for "${projectName}". Run /waves-plan ${projectName} first.`, "error");
+			if (!planFile) {
+				ctx.ui.notify(`No plan file found for "${projectName}". Run /waves-plan ${projectName} first.`, "error");
 				return;
 			}
 

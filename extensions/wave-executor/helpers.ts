@@ -113,17 +113,49 @@ export function waveProjectDir(cwd: string, name: string): string {
 	return path.join(planDir(cwd), name);
 }
 
+// ── Timestamp helper ───────────────────────────────────────────────
+
+function timestamp(): string {
+	const d = new Date();
+	const pad = (n: number) => String(n).padStart(2, "0");
+	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}`;
+}
+
+// ── Write paths (create new files with descriptive names) ──────────
+
 export function specPath(cwd: string, name: string): string {
-	return path.join(specDir(cwd), name, "SPEC.md");
+	return path.join(specDir(cwd), name, `${name}-spec-${timestamp()}.md`);
+}
+
+export function planPath(cwd: string, name: string): string {
+	return path.join(planDir(cwd), name, `${name}-plan-${timestamp()}.md`);
+}
+
+export function logFilePath(cwd: string, name: string): string {
+	return path.join(planDir(cwd), name, `${name}-execution-${timestamp()}.md`);
+}
+
+// ── Find paths (locate existing files flexibly) ────────────────────
+
+/**
+ * Find any .md file in a directory, preferring the most recent one.
+ * Returns null if the directory doesn't exist or has no .md files.
+ */
+function findMdInDir(dir: string): string | null {
+	if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return null;
+	const mds = fs.readdirSync(dir)
+		.filter((f) => f.endsWith(".md"))
+		.sort()
+		.reverse(); // latest timestamp sorts last alphabetically → reverse for most recent
+	return mds.length > 0 ? path.join(dir, mds[0]) : null;
 }
 
 /**
  * Find a spec file flexibly. Checks (in order):
  * 1. Exact file path (absolute or relative to cwd)
- * 2. Canonical location: docs/spec/<name>/SPEC.md
- * 3. Any .md file in docs/spec/<name>/
- * 4. docs/spec/<name>.md (flat file, no subdirectory)
- * 5. Legacy location: .pi/waves/<name>/SPEC.md
+ * 2. Any .md in docs/spec/<name>/ (most recent)
+ * 3. docs/spec/<name>.md (flat file)
+ * 4. Legacy: .pi/waves/<name>/SPEC.md
  *
  * Returns the resolved absolute path, or null if nothing found.
  */
@@ -136,34 +168,45 @@ export function findSpecFile(cwd: string, nameOrPath: string): string | null {
 
 	const name = slugify(nameOrPath);
 
-	// 2. Canonical: docs/spec/<name>/SPEC.md
-	const canonical = path.join(specDir(cwd), name, "SPEC.md");
-	if (fs.existsSync(canonical)) return canonical;
+	// 2. Any .md in docs/spec/<name>/
+	const fromDir = findMdInDir(path.join(specDir(cwd), name));
+	if (fromDir) return fromDir;
 
-	// 3. Any .md in docs/spec/<name>/
-	const projDir = path.join(specDir(cwd), name);
-	if (fs.existsSync(projDir) && fs.statSync(projDir).isDirectory()) {
-		const mds = fs.readdirSync(projDir).filter((f) => f.endsWith(".md"));
-		if (mds.length > 0) return path.join(projDir, mds[0]);
-	}
-
-	// 4. Flat file: docs/spec/<name>.md
+	// 3. Flat file: docs/spec/<name>.md
 	const flat = path.join(specDir(cwd), `${name}.md`);
 	if (fs.existsSync(flat)) return flat;
 
-	// 5. Legacy: .pi/waves/<name>/SPEC.md
+	// 4. Legacy: .pi/waves/<name>/SPEC.md
 	const legacy = path.join(cwd, ".pi", "waves", name, "SPEC.md");
 	if (fs.existsSync(legacy)) return legacy;
 
 	return null;
 }
 
-export function planPath(cwd: string, name: string): string {
-	return path.join(planDir(cwd), name, "PLAN.md");
-}
+/**
+ * Find a plan file for a project.
+ * Searches docs/plan/<name>/ for the most recent *-plan-*.md file,
+ * falling back to any .md, then legacy PLAN.md.
+ */
+export function findPlanFile(cwd: string, nameOrPath: string): string | null {
+	const name = slugify(nameOrPath);
+	const dir = path.join(planDir(cwd), name);
 
-export function logFilePath(cwd: string, name: string): string {
-	return path.join(planDir(cwd), name, "EXECUTION.md");
+	if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
+		const files = fs.readdirSync(dir).filter((f) => f.endsWith(".md"));
+		// Prefer plan files over execution logs
+		const plans = files.filter((f) => f.includes("-plan-")).sort().reverse();
+		if (plans.length > 0) return path.join(dir, plans[0]);
+		// Fall back to any .md that isn't an execution log
+		const nonExec = files.filter((f) => !f.includes("-execution-")).sort().reverse();
+		if (nonExec.length > 0) return path.join(dir, nonExec[0]);
+	}
+
+	// Legacy
+	const legacy = path.join(cwd, ".pi", "waves", name, "PLAN.md");
+	if (fs.existsSync(legacy)) return legacy;
+
+	return null;
 }
 
 export function ensureProjectDir(cwd: string, name: string): void {
