@@ -48,6 +48,7 @@ Wave 9: Final Verification      ← wave-verifier runs full suite
 5. **Self-contained tasks** — each task must include ALL context: file paths, function signatures, types, expected behavior, imports, test framework conventions
 6. **Test tasks must describe expected behavior**, not implementation details. The test-writer should know WHAT to test, not HOW it's implemented.
 7. **Implementation tasks must reference their tests** — tell the worker which test file to make pass
+8. **Include key code hints** — each task should include small, targeted code snippets that reduce ambiguity for the executing agent. See the "Code Hints" section below.
 
 ## Task Agent Assignment
 
@@ -56,6 +57,48 @@ Each task MUST specify which agent executes it:
 - `agent: test-writer` — for writing tests (receives behavior descriptions)
 - `agent: worker` — for writing implementation (receives test file paths to satisfy)
 - `agent: wave-verifier` — for verification (receives list of test commands to run)
+
+## Code Hints
+
+Each task description should include **small, targeted code snippets** that anchor the executing agent. These are NOT full implementations — they're the critical pieces that prevent misinterpretation.
+
+**What to include:**
+- Type/interface definitions the task must implement or use (exact signatures)
+- Function signatures with parameter types and return types
+- Key imports the agent will need
+- Example test assertions (for test-writer tasks) showing expected behavior
+- The specific pattern to follow if it must match existing code conventions
+
+**What NOT to include:**
+- Full function bodies — let the agent figure out the implementation
+- Boilerplate (imports that are obvious, standard test setup)
+- Long code blocks — keep each snippet under 10-15 lines
+- Implementation logic — describe WHAT, show the interface, not HOW
+
+**Example — good code hint for a test task:**
+```typescript
+// Test that parseConfig handles missing fields
+// Expected: parseConfig({}) → throws ConfigError with code "MISSING_REQUIRED"
+// Expected: parseConfig({ name: "x" }) → returns { name: "x", timeout: 30 } (default timeout)
+```
+
+**Example — good code hint for an implementation task:**
+```typescript
+// Must implement this interface from types.ts:
+interface ConfigParser {
+  parse(raw: Record<string, unknown>): Config;
+  validate(config: Config): ValidationResult;
+}
+// Must satisfy tests in config.test.ts
+```
+
+**Example — too much code (don't do this):**
+```typescript
+function parse(raw: Record<string, unknown>): Config {
+  if (!raw.name) throw new ConfigError("MISSING_REQUIRED", "name is required");
+  return { name: String(raw.name), timeout: Number(raw.timeout ?? 30) };
+}
+```
 
 ## Output Format
 
@@ -86,6 +129,10 @@ Brief description of the testing strategy: framework, patterns, directory struct
   - [edge case]
   Import from `path/to/feature.ts` (does not exist yet).
   Follow project test patterns found in [existing test examples].
+  ```typescript
+  // Expected: createFeature({ name: "x" }) → returns Feature with id generated
+  // Expected: createFeature({}) → throws ValidationError
+  ```
 
 ## Wave 2: <Layer> — Implementation
 <Make the tests from Wave 1 pass>
@@ -96,7 +143,11 @@ Brief description of the testing strategy: framework, patterns, directory struct
 - **Spec refs**: FR-1, FR-2
 - **Tests**: `path/to/feature.test.ts`
 - **Description**: Implement [feature] to make tests in `path/to/feature.test.ts` pass.
-  [Include all necessary context: types, interfaces, function signatures, etc.]
+  ```typescript
+  // Must export:
+  interface Feature { id: string; name: string; }
+  function createFeature(input: CreateFeatureInput): Feature
+  ```
 
 ## Wave 3: <Layer> — Verification
 <Verify tests pass and code quality>
