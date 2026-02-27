@@ -3,9 +3,9 @@
  *
  * Three-phase workflow with reviewable files:
  *
- *   /spec <task>    — Scout + brainstorm → creates SPEC.md
- *   /plan           — Reads SPEC.md → creates PLAN.md (wave-based tasks)
- *   /execute        — Reads SPEC.md + PLAN.md → wave-executes with verification
+ *   /waves-spec <task>    — Scout + brainstorm → creates SPEC.md
+ *   /waves-plan           — Reads SPEC.md → creates PLAN.md (wave-based tasks)
+ *   /waves-execute        — Reads SPEC.md + PLAN.md → wave-executes with verification
  *
  * Files are written to .pi/waves/ in the project directory so you can
  * review, edit, and version control them before executing.
@@ -464,7 +464,7 @@ export default function (pi: ExtensionAPI) {
 				].filter(Boolean).join("  ");
 				summary += `- **${name}**  ${icons}\n`;
 			}
-			summary += `\nCommands: \`/spec <task>\`, \`/plan <name>\`, \`/execute <name>\``;
+			summary += `\nCommands: \`/waves-spec <task>\`, \`/waves-plan <name>\`, \`/waves-execute <name>\``;
 
 			pi.sendMessage(
 				{ customType: "wave-list", content: summary, display: true },
@@ -473,7 +473,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ── /spec ────────────────────────────────────────────────────────
+	// ── /waves-spec ─────────────────────────────────────────────────
 
 	const SCOPES = ["hack", "standard", "enterprise"] as const;
 	type Scope = (typeof SCOPES)[number];
@@ -489,393 +489,148 @@ export default function (pi: ExtensionAPI) {
 		return { scope: "standard", query: trimmed };
 	}
 
-	interface ScopeConfig {
-		emoji: string;
-		label: string;
-		specAgent: string;
-		scoutDepth: string;
-		interviewRounds: { questions: InterviewQuestion[] }[];
+	function buildBrainstormPrompt(scope: Scope, query: string, projectName: string, scoutContext: string, specFilePath: string): string {
+		const scopeLabel = scope === "hack" ? "quick hack" : scope === "enterprise" ? "enterprise-grade" : "standard";
+
+		const scopeGuidance = scope === "hack"
+			? `This is a **quick hack** — keep brainstorming brief. 1-2 clarifying questions max, then propose the simplest approach and write a short spec (under 50 lines).
+
+**Topics to cover** (briefly — skip any that are obvious from context):
+- [ ] Approach: quickest path vs slightly cleaner
+- [ ] Where to make the change (which files)
+- [ ] What "done" looks like`
+			: scope === "enterprise"
+			? `This is **enterprise-grade** work. Be thorough in your exploration. Ask as many questions as needed across multiple rounds.
+
+**Topics you MUST cover** — ask about each one if the user hasn't addressed it yet. Check them off mentally as you go. Before writing the spec, review this list and ask about any uncovered topics.
+
+- [ ] **Problem & goal**: What problem does this solve? What's the desired outcome?
+- [ ] **Users/consumers**: Who uses this? (end users, developers, internal systems)
+- [ ] **Integration strategy**: Extend existing code, new module, replace, adapter, or greenfield?
+- [ ] **Integration points**: Which specific files/functions/interfaces does new code hook into?
+- [ ] **Legacy & compatibility**: Must preserve existing behavior? Deprecation path? Migration?
+- [ ] **Legacy cleanup**: Clean up adjacent code or leave untouched?
+- [ ] **Scale & performance**: Expected load? Latency requirements? Caching needs?
+- [ ] **Constraints**: Backward compatibility, deadlines, dependency versions?
+- [ ] **Security**: Auth changes, input validation, data exposure, rate limiting?
+- [ ] **Error handling**: Error taxonomy, response format, recovery behavior, edge cases?
+- [ ] **API versioning**: Versioning strategy, breaking vs non-breaking changes?
+- [ ] **Testing strategy**: TDD? Unit + integration + E2E? Match existing patterns?
+- [ ] **Logging & monitoring**: Log levels, structured logging, health checks, metrics, alerting?
+- [ ] **CI/CD & deployment**: Pipeline changes, feature flags, rollback, migration?
+- [ ] **Documentation**: API docs, ADRs, runbooks, README updates?
+- [ ] **Scalability plan**: Horizontal scaling, stateless design, bottlenecks?`
+			: `This is **standard** scope. Balance thoroughness with pragmatism. 3-6 clarifying questions across a few rounds.
+
+**Topics you MUST cover** — ask about each one if the user hasn't addressed it yet. Before writing the spec, review this list and ask about any uncovered topics.
+
+- [ ] **Goal**: What are we building and why?
+- [ ] **Scope**: Minimal change, moderate (include related cleanups), or thorough (tests, docs, related code)?
+- [ ] **Approach**: Propose 2-3 options with trade-offs
+- [ ] **Patterns & conventions**: Follow existing codebase patterns or specific preferences?
+- [ ] **Testing**: Match existing test patterns, comprehensive, minimal, or none?
+- [ ] **Error handling**: How should errors be handled? Match existing patterns?
+- [ ] **Affected files**: Which files need changes?`;
+
+		return `# Brainstorming: ${query}
+
+You are brainstorming a ${scopeLabel} feature with the user. A scout has already explored the codebase. Your job is to have a **natural, collaborative conversation** to fully understand what needs to be built before writing the spec.
+
+## Scout Findings
+
+${scoutContext}
+
+## Your Process
+
+${scopeGuidance}
+
+**How to brainstorm:**
+1. **Present the scout findings** — summarize what you found in the codebase relevant to this task
+2. **Ask clarifying questions ONE AT A TIME** — don't overwhelm with multiple questions. Prefer offering 2-3 concrete options when possible, but open-ended is fine too
+3. **Propose 2-3 approaches** with trade-offs and your recommendation — explain WHY you recommend one
+4. **Iterate** — go back and forth until the design is clear. Be ready to revise based on feedback
+5. **Before offering to write the spec**, review the topics checklist above. If any topic hasn't been discussed and is relevant, ask about it now.
+6. **When all topics are covered and the user approves**, write the spec to \`${specFilePath}\`
+
+**IMPORTANT RULES:**
+- Do NOT write any implementation code. Only explore, discuss, and ultimately write the spec.
+- Do NOT write the spec until the user has approved the approach. Ask "Ready for me to write the spec?" or similar.
+- Ask ONE question per message. If a topic needs more exploration, break it into multiple messages.
+- If the user's answer covers multiple topics at once, acknowledge that and move on — don't re-ask about things already answered.
+- If a topic from the checklist is clearly not relevant (e.g., API versioning for an internal refactor), briefly note you're skipping it and why.
+- When you DO write the spec, save it to \`${specFilePath}\` using the write tool.
+- After writing the spec, tell the user: "Next step: \`/waves-plan ${projectName}\` to create the implementation plan."
+
+## Spec Format (when ready to write)
+
+${scope === "hack" ? `\`\`\`markdown
+# Spec: <Title>
+
+## What
+2-3 sentences. What we're building.
+
+## Where
+- \`path/to/file.ts\` — what changes
+
+## How
+Brief approach. 5-10 lines max.
+
+## Done When
+Bullet list of what "working" looks like.
+\`\`\`` : scope === "enterprise" ? `Write a comprehensive spec (200-500+ lines) covering:
+- Overview, Current State, User Decisions
+- Functional Requirements (20-50+), Non-Functional Requirements (10-20)
+- Affected Files, API/Interface Changes, Data Model Changes
+- Integration Strategy (integration points, approach, legacy considerations, dependency map)
+- Error Handling Strategy (taxonomy, edge cases, error scenarios)
+- Security, API Versioning, Logging & Monitoring
+- CI/CD & Deployment, Documentation Plan, Scalability Plan
+- Testing Criteria (unit, integration, E2E, edge case, performance)
+- Migration Plan, Out of Scope, Open Questions` : `\`\`\`markdown
+# Spec: <Title>
+
+## Overview
+3-5 sentences on what this feature does.
+
+## Current State
+Key files, how things work now.
+
+## Requirements
+1. FR-1: ...
+(10-20 requirements)
+
+## Affected Files
+- \`path/to/file.ts\` — what changes
+
+## API / Interface Changes
+New or changed APIs, types, signatures.
+
+## Testing Criteria
+- Test that X works when Y
+(5-15 test criteria)
+
+## Out of Scope
+What we're explicitly NOT doing.
+\`\`\``}
+
+Now, start by presenting the scout findings and asking your first question.`;
 	}
 
-	interface InterviewQuestion {
-		id: string;
-		prompt: string;
-		options: { label: string; description?: string }[];
-		allowCustom: boolean;
-		condition?: (answers: Map<string, string>) => boolean;
-	}
-
-	function buildInterviewRounds(scope: Scope, scoutContext: string): { questions: InterviewQuestion[] }[] {
-		if (scope === "hack") {
-			return [{
-				questions: [
-					{
-						id: "approach",
-						prompt: "Which approach do you prefer?",
-						options: [
-							{ label: "Quickest path — minimal changes", description: "Just get it working" },
-							{ label: "Slightly cleaner — basic structure", description: "A bit more thought, still fast" },
-						],
-						allowCustom: true,
-					},
-				],
-			}];
-		}
-
-		if (scope === "standard") {
-			return [
-				{
-					questions: [
-						{
-							id: "goal",
-							prompt: "What's the main goal? (pick closest or type your own)",
-							options: [
-								{ label: "Add a new feature" },
-								{ label: "Refactor / improve existing code" },
-								{ label: "Fix a bug or issue" },
-								{ label: "Performance improvement" },
-							],
-							allowCustom: true,
-						},
-						{
-							id: "scope",
-							prompt: "How far should this go?",
-							options: [
-								{ label: "Minimal — just the core change", description: "No extras" },
-								{ label: "Moderate — include related cleanups", description: "Fix things along the way" },
-								{ label: "Thorough — update tests, docs, related code", description: "Do it properly" },
-							],
-							allowCustom: false,
-						},
-					],
-				},
-				{
-					questions: [
-						{
-							id: "patterns",
-							prompt: "Any specific patterns or conventions to follow?",
-							options: [
-								{ label: "Follow existing patterns in the codebase" },
-								{ label: "I have specific preferences (I'll type them)" },
-								{ label: "No preference — use best judgment" },
-							],
-							allowCustom: true,
-						},
-						{
-							id: "testing",
-							prompt: "Testing approach?",
-							options: [
-								{ label: "Match existing test patterns" },
-								{ label: "Add comprehensive tests" },
-								{ label: "Minimal tests — just critical paths" },
-								{ label: "No tests needed" },
-							],
-							allowCustom: false,
-						},
-					],
-				},
-			];
-		}
-
-		// enterprise
-		return [
-			{
-				questions: [
-					{
-						id: "problem",
-						prompt: "What problem does this solve? (describe in your own words or pick)",
-						options: [
-							{ label: "New capability the system doesn't have" },
-							{ label: "Replacing/upgrading an existing solution" },
-							{ label: "Addressing technical debt or scalability" },
-							{ label: "Security or compliance requirement" },
-						],
-						allowCustom: true,
-					},
-					{
-						id: "users",
-						prompt: "Who are the users/consumers?",
-						options: [
-							{ label: "End users (via UI)" },
-							{ label: "Other developers (via API)" },
-							{ label: "Internal systems (via integration)" },
-							{ label: "All of the above" },
-						],
-						allowCustom: true,
-					},
-				],
-			},
-			{
-				questions: [
-					{
-						id: "integration_strategy",
-						prompt: "How should this integrate with the existing codebase?",
-						options: [
-							{ label: "Extend existing code — add to current modules/classes" },
-							{ label: "New module that plugs into existing interfaces" },
-							{ label: "Replace/rewrite existing implementation entirely" },
-							{ label: "Adapter/wrapper around existing code" },
-							{ label: "Greenfield — no existing code to integrate with" },
-						],
-						allowCustom: true,
-					},
-					{
-						id: "integration_points",
-						prompt: "Where are the key integration points? (scout will have proposed some)",
-						options: [
-							{ label: "Use the integration points the scout identified" },
-							{ label: "I'll specify exact files/interfaces to hook into" },
-							{ label: "Need to discover — explore the codebase first" },
-						],
-						allowCustom: true,
-					},
-				],
-			},
-			{
-				questions: [
-					{
-						id: "legacy_support",
-						prompt: "Legacy code / backward compatibility stance?",
-						options: [
-							{ label: "Must preserve all existing behavior — extend only" },
-							{ label: "Can deprecate old paths with migration period" },
-							{ label: "Replace entirely — old code can be removed" },
-							{ label: "Strangler fig — run old and new side by side, migrate gradually" },
-							{ label: "No legacy concerns — this is new" },
-						],
-						allowCustom: true,
-					},
-					{
-						id: "legacy_cleanup",
-						prompt: "Should we clean up / simplify related existing code while we're at it?",
-						options: [
-							{ label: "Yes — refactor adjacent code if it simplifies integration" },
-							{ label: "Minimal — only change what's strictly needed" },
-							{ label: "No — don't touch anything outside the new feature scope" },
-						],
-						allowCustom: true,
-					},
-				],
-			},
-			{
-				questions: [
-					{
-						id: "scale",
-						prompt: "Expected scale/load?",
-						options: [
-							{ label: "Low — internal tool, handful of users" },
-							{ label: "Medium — production, moderate traffic" },
-							{ label: "High — high throughput, latency-sensitive" },
-							{ label: "Not applicable" },
-						],
-						allowCustom: false,
-					},
-					{
-						id: "constraints",
-						prompt: "Any hard constraints?",
-						options: [
-							{ label: "Must be backward compatible" },
-							{ label: "Specific deadline or release target" },
-							{ label: "Must work with specific dependencies/versions" },
-							{ label: "No major constraints" },
-						],
-						allowCustom: true,
-					},
-				],
-			},
-			{
-				questions: [
-					{
-						id: "security",
-						prompt: "Security considerations?",
-						options: [
-							{ label: "Auth/authorization changes needed" },
-							{ label: "Input validation / data sanitization" },
-							{ label: "Data exposure / privacy concerns" },
-							{ label: "Rate limiting / abuse prevention needed" },
-							{ label: "Standard security practices sufficient" },
-						],
-						allowCustom: true,
-					},
-					{
-						id: "testing",
-						prompt: "Testing strategy?",
-						options: [
-							{ label: "Full TDD — unit + integration + E2E" },
-							{ label: "Unit + integration tests" },
-							{ label: "Match existing test coverage patterns" },
-						],
-						allowCustom: true,
-					},
-				],
-			},
-			{
-				questions: [
-					{
-						id: "error_handling",
-						prompt: "Error handling strategy?",
-						options: [
-							{ label: "Typed error hierarchy with error codes" },
-							{ label: "Structured error responses (code, message, details)" },
-							{ label: "Match existing error patterns in the codebase" },
-							{ label: "Basic try/catch with logging" },
-						],
-						allowCustom: true,
-					},
-					{
-						id: "api_versioning",
-						prompt: "API versioning approach?",
-						options: [
-							{ label: "URL path versioning (e.g. /v1/, /v2/)" },
-							{ label: "Header-based versioning" },
-							{ label: "No versioning needed — internal only" },
-							{ label: "Follow existing API versioning pattern" },
-						],
-						allowCustom: true,
-					},
-				],
-			},
-			{
-				questions: [
-					{
-						id: "logging",
-						prompt: "Logging & monitoring approach?",
-						options: [
-							{ label: "Structured logging (JSON) with log levels and correlation IDs" },
-							{ label: "Structured logging with metrics/health endpoints" },
-							{ label: "Match existing logging patterns" },
-							{ label: "Minimal — errors and warnings only" },
-						],
-						allowCustom: true,
-					},
-					{
-						id: "monitoring",
-						prompt: "Monitoring & observability needs?",
-						options: [
-							{ label: "Health checks + metrics endpoints + alerting rules" },
-							{ label: "Health checks + basic metrics" },
-							{ label: "Log-based monitoring only" },
-							{ label: "Not needed for this change" },
-						],
-						allowCustom: false,
-					},
-				],
-			},
-			{
-				questions: [
-					{
-						id: "cicd",
-						prompt: "CI/CD & deployment considerations?",
-						options: [
-							{ label: "Full pipeline — lint, test, build, stage, deploy with rollback" },
-							{ label: "Add to existing CI pipeline (tests + build)" },
-							{ label: "Feature flags for gradual rollout" },
-							{ label: "No CI/CD changes needed" },
-						],
-						allowCustom: true,
-					},
-					{
-						id: "documentation",
-						prompt: "Documentation requirements?",
-						options: [
-							{ label: "Full docs — API reference, architecture decision record, runbook" },
-							{ label: "API docs + inline code documentation" },
-							{ label: "README updates + inline comments" },
-							{ label: "Code comments only" },
-						],
-						allowCustom: true,
-					},
-				],
-			},
-			{
-				questions: [
-					{
-						id: "scalability",
-						prompt: "Scalability outlook?",
-						options: [
-							{ label: "Design for horizontal scaling from the start" },
-							{ label: "Identify bottlenecks + document scaling plan for later" },
-							{ label: "Stateless design, scale-ready but no immediate plan" },
-							{ label: "Not a concern for this scope" },
-						],
-						allowCustom: true,
-					},
-					{
-						id: "compatibility",
-						prompt: "Backward compatibility / migration?",
-						options: [
-							{ label: "Must be fully backward compatible" },
-							{ label: "Breaking changes OK with migration path" },
-							{ label: "Greenfield — no compatibility concerns" },
-						],
-						allowCustom: true,
-					},
-				],
-			},
-		];
-	}
-
-	async function runInterview(
-		ctx: ExtensionContext,
-		scope: Scope,
-		scoutContext: string,
-	): Promise<Map<string, string> | null> {
-		const answers = new Map<string, string>();
-		const rounds = buildInterviewRounds(scope, scoutContext);
-
-		for (let ri = 0; ri < rounds.length; ri++) {
-			const round = rounds[ri];
-			const questions = round.questions.filter((q) => !q.condition || q.condition(answers));
-			if (questions.length === 0) continue;
-
-			for (const question of questions) {
-				const options = question.options.map((o) => o.label);
-				if (question.allowCustom) options.push("Let me type my own answer...");
-
-				const choice = await ctx.ui.select(question.prompt, options);
-				if (choice === undefined) return null; // cancelled
-
-				if (choice === "Let me type my own answer...") {
-					const custom = await ctx.ui.input(question.prompt);
-					if (custom === undefined) return null;
-					answers.set(question.id, custom || "(no answer)");
-				} else {
-					answers.set(question.id, choice);
-				}
-			}
-		}
-
-		// Enterprise: final confirmation
-		if (scope === "enterprise" && answers.size > 0) {
-			let summary = "Here's what I gathered:\n\n";
-			for (const [id, answer] of answers) {
-				summary += `• **${id}**: ${answer}\n`;
-			}
-			const ok = await ctx.ui.confirm("Does this capture everything?", summary);
-			if (!ok) {
-				const extra = await ctx.ui.input("What's missing or needs clarification?");
-				if (extra) answers.set("additional_notes", extra);
-			}
-		}
-
-		return answers;
-	}
-
-	pi.registerCommand("spec", {
-		description: "Create a spec: /spec [hack|standard|enterprise] <task> (default: standard)",
+	pi.registerCommand("waves-spec", {
+		description: "Brainstorm and create a spec: /waves-spec [hack|standard|enterprise] <task>",
 		handler: async (args, ctx) => {
 			const parsed = parseSpecArgs(args || "");
 			if (!parsed) {
 				ctx.ui.notify(
-					"Usage: /spec [scope] <task>\n\n" +
+					"Usage: /waves-spec [scope] <task>\n\n" +
 					"Scopes:\n" +
-					"  hack        — quick & dirty, 1-2 questions, minimal spec\n" +
-					"  standard    — balanced, 3-6 questions, solid requirements (default)\n" +
-					"  enterprise  — thorough, multi-round interview, full E2E coverage\n\n" +
+					"  hack        — quick, 1-2 questions, minimal spec\n" +
+					"  standard    — balanced, collaborative brainstorming (default)\n" +
+					"  enterprise  — thorough, multi-round exploration\n\n" +
 					"Examples:\n" +
-					"  /spec hack add a debug flag\n" +
-					"  /spec add OAuth2 support\n" +
-					"  /spec enterprise redesign the auth module",
+					"  /waves-spec hack add a debug flag\n" +
+					"  /waves-spec add OAuth2 support\n" +
+					"  /waves-spec enterprise redesign the auth module",
 					"info",
 				);
 				return;
@@ -883,7 +638,6 @@ export default function (pi: ExtensionAPI) {
 
 			const { scope, query } = parsed;
 			const scopeEmoji = scope === "hack" ? "⚡" : scope === "enterprise" ? "🏢" : "📋";
-			const specAgent = `spec-writer-${scope}`;
 			const projectName = slugify(query);
 			ensureProjectDir(ctx.cwd, projectName);
 
@@ -903,98 +657,74 @@ export default function (pi: ExtensionAPI) {
 			}
 			ctx.ui.setStatus("waves", undefined);
 
-			// Phase 2: Interactive interview (runs in main process with full UI)
-			ctx.ui.notify(`${scopeEmoji} Starting ${scope} interview...`, "info");
-			const answers = await runInterview(ctx, scope, scoutOutput);
-
-			if (!answers) {
-				ctx.ui.notify("Interview cancelled.", "info");
-				return;
-			}
-
-			// Format answers for spec writer
-			let interviewSection = "";
-			if (answers.size > 0) {
-				interviewSection = "\n\nUser interview answers:\n";
-				for (const [id, answer] of answers) {
-					interviewSection += `- ${id}: ${answer}\n`;
-				}
-			}
-
-			// Phase 3: Write spec (non-interactive sub-agent, gets scout context + interview answers)
-			ctx.ui.setStatus("waves", ctx.ui.theme.fg("warning", `${scopeEmoji} [${projectName}] Writing SPEC.md (${scope})...`));
+			// Phase 2: Brainstorm — send context to main agent for collaborative conversation
 			const file = specPath(ctx.cwd, projectName);
 			const relFile = path.relative(ctx.cwd, file);
 
-			const specTask = `Scope level: ${scope.toUpperCase()}
-Task: "${query}"
+			const brainstormPrompt = buildBrainstormPrompt(scope, query, projectName, scoutOutput, relFile);
 
-Codebase context from scout:
-${scoutOutput}
-${interviewSection}
-IMPORTANT: Write the specification directly to the file \`${relFile}\`.
-Use the write tool to create the file. You can read it back to verify.`;
+			ctx.ui.notify(`${scopeEmoji} Scout complete. Starting brainstorming session...`, "info");
 
-			const specResult = await runSubagent(specAgent, specTask, ctx.cwd, undefined, {
-				allowWrite: [file],
-				safeBashOnly: scope !== "enterprise",
-			});
-
-			ctx.ui.setStatus("waves", undefined);
-
-			if (specResult.exitCode !== 0) {
-				ctx.ui.notify("Spec writer failed: " + (specResult.stderr || "no output"), "error");
-				return;
-			}
-
-			if (!fs.existsSync(file)) {
-				ctx.ui.notify("Spec writer did not create SPEC.md", "error");
-				return;
-			}
-
-			const specContent = fs.readFileSync(file, "utf-8");
 			pi.sendMessage(
 				{
-					customType: "wave-spec",
-					content: `${scopeEmoji} **${projectName}/SPEC.md** [${scope}] → \`${relFile}\`\n\nReview and edit the spec, then run \`/plan ${projectName}\` to create the implementation plan.\n\n---\n\n${specContent.slice(0, 3000)}${specContent.length > 3000 ? "\n\n*(truncated — see full file)*" : ""}`,
-					display: true,
+					customType: "wave-brainstorm",
+					content: brainstormPrompt,
+					display: false,
 				},
-				{ triggerTurn: false },
+				{
+					triggerTurn: true,
+					deliverAs: "followUp",
+				},
 			);
-
-			ctx.ui.notify(`SPEC.md → ${relFile}. Next: /plan ${projectName}`, "info");
 		},
 	});
 
 	// ── /plan ────────────────────────────────────────────────────────
 
-	pi.registerCommand("plan", {
-		description: "Create PLAN.md for a wave project (e.g. /plan add-oauth2-support)",
+	pi.registerCommand("waves-plan", {
+		description: "Create PLAN.md for a wave project (e.g. /waves-plan add-oauth2-support)",
 		handler: async (args, ctx) => {
-			if (!args?.trim()) {
-				// List projects that have a spec but no plan yet
-				const projects = listWaveProjects(ctx.cwd);
-				const ready = projects.filter((p) =>
-					fs.existsSync(specPath(ctx.cwd, p)) && !fs.existsSync(planPath(ctx.cwd, p))
-				);
-				if (ready.length > 0) {
-					ctx.ui.notify(`Usage: /plan <name>\nReady for planning: ${ready.join(", ")}`, "info");
-				} else if (projects.length > 0) {
-					ctx.ui.notify(`Usage: /plan <name> [extra instructions]\nProjects: ${projects.join(", ")}`, "info");
-				} else {
-					ctx.ui.notify("No wave projects. Run /spec <task> first.", "info");
-				}
-				return;
-			}
+			let projectName: string;
+			let extraInstructions: string;
 
-			// Parse: first word is project name, rest is extra instructions
-			const parts = args.trim().split(/\s+/);
-			const projectName = slugify(parts[0]);
-			const extraInstructions = parts.slice(1).join(" ");
+			if (!args?.trim()) {
+				// No args: check current dir for SPEC.md first
+				const localSpec = path.join(ctx.cwd, "SPEC.md");
+				if (fs.existsSync(localSpec)) {
+					// Use current directory's SPEC.md — create a project from the dir name
+					projectName = slugify(path.basename(ctx.cwd));
+					extraInstructions = "";
+					ensureProjectDir(ctx.cwd, projectName);
+					// Copy local SPEC.md into wave project dir if not already there
+					const waveSpec = specPath(ctx.cwd, projectName);
+					if (!fs.existsSync(waveSpec)) {
+						fs.copyFileSync(localSpec, waveSpec);
+					}
+				} else {
+					// List projects that have a spec but no plan yet
+					const projects = listWaveProjects(ctx.cwd);
+					const ready = projects.filter((p) =>
+						fs.existsSync(specPath(ctx.cwd, p)) && !fs.existsSync(planPath(ctx.cwd, p))
+					);
+					if (ready.length > 0) {
+						ctx.ui.notify(`Usage: /waves-plan <name>\nReady for planning: ${ready.join(", ")}`, "info");
+					} else if (projects.length > 0) {
+						ctx.ui.notify(`Usage: /waves-plan <name> [extra instructions]\nProjects: ${projects.join(", ")}`, "info");
+					} else {
+						ctx.ui.notify("No wave projects and no SPEC.md in current dir. Run /waves-spec <task> first.", "info");
+					}
+					return;
+				}
+			} else {
+				// Parse: first word is project name, rest is extra instructions
+				const parts = args.trim().split(/\s+/);
+				projectName = slugify(parts[0]);
+				extraInstructions = parts.slice(1).join(" ");
+			}
 
 			const spec = specPath(ctx.cwd, projectName);
 			if (!fs.existsSync(spec)) {
-				ctx.ui.notify(`No SPEC.md found for "${projectName}". Run /spec <task> first.`, "error");
+				ctx.ui.notify(`No SPEC.md found for "${projectName}". Run /waves-spec <task> first.`, "error");
 				return;
 			}
 
@@ -1047,21 +777,21 @@ You can read it back to verify the format is correct.`;
 				if (verifyCount) parts2.push(`🔍 ${verifyCount} verify`);
 				summary += `- **${wave.name}**: ${parts2.join(", ")} — ${wave.description}\n`;
 			}
-			summary += `\nReview and edit, then run \`/execute ${projectName}\``;
+			summary += `\nReview and edit, then run \`/waves-execute ${projectName}\``;
 
 			pi.sendMessage(
 				{ customType: "wave-plan", content: summary, display: true },
 				{ triggerTurn: false },
 			);
 
-			ctx.ui.notify(`PLAN.md → ${relPlan} — ${plan.waves.length} waves, ${totalTasks} tasks. Next: /execute ${projectName}`, "info");
+			ctx.ui.notify(`PLAN.md → ${relPlan} — ${plan.waves.length} waves, ${totalTasks} tasks. Next: /waves-execute ${projectName}`, "info");
 		},
 	});
 
 	// ── /execute ─────────────────────────────────────────────────────
 
-	pi.registerCommand("execute", {
-		description: "Execute a wave project's PLAN.md (e.g. /execute add-oauth2-support)",
+	pi.registerCommand("waves-execute", {
+		description: "Execute a wave project's PLAN.md (e.g. /waves-execute add-oauth2-support)",
 		handler: async (args, ctx) => {
 			if (!args?.trim()) {
 				const projects = listWaveProjects(ctx.cwd);
@@ -1071,7 +801,7 @@ You can read it back to verify the format is correct.`;
 				if (ready.length > 0) {
 					ctx.ui.notify(`Usage: /execute <name>\nReady to execute: ${ready.join(", ")}`, "info");
 				} else {
-					ctx.ui.notify("No projects ready. Run /spec then /plan first.", "info");
+					ctx.ui.notify("No projects ready. Run /waves-spec then /waves-plan first.", "info");
 				}
 				return;
 			}
@@ -1081,11 +811,11 @@ You can read it back to verify the format is correct.`;
 			const planFile = planPath(ctx.cwd, projectName);
 
 			if (!fs.existsSync(spec)) {
-				ctx.ui.notify(`No SPEC.md for "${projectName}". Run /spec <task> first.`, "error");
+				ctx.ui.notify(`No SPEC.md for "${projectName}". Run /waves-spec <task> first.`, "error");
 				return;
 			}
 			if (!fs.existsSync(planFile)) {
-				ctx.ui.notify(`No PLAN.md for "${projectName}". Run /plan ${projectName} first.`, "error");
+				ctx.ui.notify(`No PLAN.md for "${projectName}". Run /waves-plan ${projectName} first.`, "error");
 				return;
 			}
 

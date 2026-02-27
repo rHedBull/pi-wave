@@ -1,4 +1,4 @@
 ---
-description: Create spec, plan, and execute via wave-based parallel agents (/spec → /plan → /execute)
+description: Create spec, plan, and execute via wave-based parallel agents (/waves-spec → /waves-plan → /waves-execute)
 ---
-/spec $@
+/waves-spec $@

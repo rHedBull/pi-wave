@@ -14,7 +14,7 @@ pi install git:github.com/rHedBull/pi-wave
 
 | Extension | Description |
 |-----------|-------------|
-| **wave-executor** | Wave-based TDD execution engine with `/spec`, `/plan`, `/waves`, `/waves-plan` commands |
+| **wave-executor** | Wave-based TDD execution engine with `/waves-spec`, `/waves-plan`, `/waves-execute`, `/waves` commands |
 | **subagent** | Delegate tasks to specialized agents — single, parallel (with git worktree isolation), or chained |
 | **git-workflow** | `/feature-branch` and `/feature-done` commands for feature branch lifecycle |
 | **security-guidance** | Pre-write security checks (XSS, injection, eval, hardcoded secrets, etc.) |
@@ -30,7 +30,7 @@ pi install git:github.com/rHedBull/pi-wave
 | **worker** | General-purpose implementation agent | Sonnet |
 | **reviewer** | Code review for quality and security | Sonnet |
 | **pr-reviewer** | PR-specific review with confidence scoring | Sonnet |
-| **spec-writer** | Interactive specification writer (hack/standard/enterprise) | Sonnet |
+| **spec-writer** | Specification writer templates (hack/standard/enterprise) — used standalone | Sonnet |
 | **test-writer** | Writes tests from behavior descriptions | Sonnet |
 | **wave-planner** | Creates TDD wave-based implementation plans | Sonnet |
 | **wave-verifier** | Verifies wave task completion | Sonnet |
@@ -46,7 +46,6 @@ pi install git:github.com/rHedBull/pi-wave
 | `/commit-push-pr` | Commit + push + create PR in one step |
 | `/clean-gone` | Clean up local branches deleted from remote |
 | `/waves <description>` | Full wave workflow: spec → plan → execute |
-| `/waves-plan <spec-path>` | Plan + execute from existing spec |
 
 ### Skills
 
