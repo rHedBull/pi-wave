@@ -100,6 +100,61 @@ export function slugify(text: string): string {
 		.slice(0, 60);
 }
 
+/**
+ * Derive a clean project slug from a filename or user input.
+ * Strips: file extensions, "spec"/"plan"/"execution" labels, timestamps.
+ */
+export function projectSlug(input: string): string {
+	let name = path.basename(input, path.extname(input)); // strip .md etc.
+	name = name
+		.replace(/[-_]?(spec|plan|execution)[-_]?/gi, "") // strip labels
+		.replace(/[-_]?\d{4}-\d{2}-\d{2}[-_T]?\d{2}[-:]\d{2}([-:]\d{2})?/g, "") // strip timestamps
+		.replace(/^-+|-+$/g, ""); // trim leftover dashes
+	return slugify(name || input);
+}
+
+/**
+ * Resolve user input to a known project name.
+ *
+ * Tries (in order):
+ * 1. Exact match against known project directories
+ * 2. Slugified exact match
+ * 3. Partial match — known project name starts with the input
+ * 4. Partial match — input starts with a known project name
+ * 5. projectSlug (strips timestamps/labels) against known projects
+ *
+ * Returns the matching project name, or the slugified input as fallback.
+ */
+export function resolveProject(cwd: string, input: string): string {
+	const projects = listWaveProjects(cwd);
+	if (projects.length === 0) return slugify(input);
+
+	// 1. Exact match
+	if (projects.includes(input)) return input;
+
+	// 2. Slugified exact match
+	const slug = slugify(input);
+	if (projects.includes(slug)) return slug;
+
+	// 3. Clean slug (no timestamps/labels)
+	const clean = projectSlug(input);
+	if (projects.includes(clean)) return clean;
+
+	// 4. Partial: project starts with input
+	const startsWith = projects.filter((p) => p.startsWith(slug) || p.startsWith(clean));
+	if (startsWith.length === 1) return startsWith[0];
+
+	// 5. Partial: input starts with project name (user typed too much)
+	const prefixOf = projects.filter((p) => slug.startsWith(p) || clean.startsWith(p));
+	if (prefixOf.length === 1) return prefixOf[0];
+
+	// 6. Substring match
+	const contains = projects.filter((p) => p.includes(clean) || clean.includes(p));
+	if (contains.length === 1) return contains[0];
+
+	return slug; // fallback
+}
+
 function specDir(cwd: string): string {
 	return path.join(cwd, "docs", "spec");
 }

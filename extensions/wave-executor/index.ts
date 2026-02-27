@@ -24,6 +24,8 @@ import {
 	listWaveProjects,
 	logFilePath,
 	planPath,
+	projectSlug,
+	resolveProject,
 	runSubagent,
 	slugify,
 	specPath,
@@ -399,9 +401,8 @@ After writing, tell the user: "Next step: \`/waves-execute ${projectName}\`"`;
 				const found = findSpecFile(ctx.cwd, firstArg);
 				if (found) {
 					spec = found;
-					// Derive project name from the spec file or argument
-					const basename = path.basename(found, ".md").replace(/[-_]?spec[-_]?/gi, "").replace(/^-+|-+$/g, "");
-					projectName = slugify(basename || path.basename(path.dirname(found)));
+					// Derive clean project name — strip extensions, timestamps, labels
+					projectName = projectSlug(path.basename(found)) || projectSlug(path.basename(path.dirname(found)));
 				} else {
 					ctx.ui.notify(
 						`No spec file found for "${firstArg}". Looked for:\n` +
@@ -498,12 +499,16 @@ Do NOT write any files. Just output the outline as your response.`;
 				return;
 			}
 
-			const projectName = slugify(args.trim());
+			const projectName = resolveProject(ctx.cwd, args.trim());
 			const spec = findSpecFile(ctx.cwd, projectName);
 			const planFile = findPlanFile(ctx.cwd, projectName);
 
 			if (!spec) {
-				ctx.ui.notify(`No spec file found for "${projectName}". Run /waves-spec <task> first.`, "error");
+				const projects = listWaveProjects(ctx.cwd);
+				const hint = projects.length > 0
+					? `\nKnown projects: ${projects.join(", ")}`
+					: "";
+				ctx.ui.notify(`No spec file found for "${args.trim()}" (resolved to "${projectName}").${hint}`, "error");
 				return;
 			}
 			if (!planFile) {
