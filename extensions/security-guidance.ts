@@ -140,14 +140,7 @@ export default function (pi: ExtensionAPI) {
 
     shownWarnings.add(warningKey);
 
-    // Show warning and ask for confirmation
-    const proceed = await ctx.ui.confirm(
-      "Security Warning",
-      `${match.reminder}\n\nProceed with this edit?`
-    );
-
-    if (!proceed) {
-      return { block: true, reason: `Blocked by security-guidance: ${match.ruleName}` };
-    }
+    // Show warning (non-blocking — doesn't interrupt session flow)
+    ctx.ui.notify(match.reminder, "warning");
   });
 }
