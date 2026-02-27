@@ -7,8 +7,8 @@
  *   /waves-plan           — Reads SPEC.md → creates PLAN.md (wave-based tasks)
  *   /waves-execute        — Reads SPEC.md + PLAN.md → wave-executes with verification
  *
- * Files are written to .pi/waves/ in the project directory so you can
- * review, edit, and version control them before executing.
+ * Files are written to docs/spec/ and docs/plan/ in the project directory
+ * so you can review, edit, and version control them before executing.
  */
 
 import * as fs from "node:fs";
@@ -25,7 +25,6 @@ import {
 	runSubagent,
 	slugify,
 	specPath,
-	waveProjectDir,
 } from "./helpers.js";
 import { parsePlanV2 } from "./plan-parser.js";
 import type { Plan, Task, TaskResult } from "./types.js";
@@ -50,12 +49,11 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			let summary = `**Wave projects** in \`.pi/waves/\`:\n\n`;
+			let summary = `**Wave projects** in \`docs/spec/\` and \`docs/plan/\`:\n\n`;
 			for (const name of projects) {
-				const dir = waveProjectDir(ctx.cwd, name);
-				const hasSpec = fs.existsSync(path.join(dir, "SPEC.md"));
-				const hasPlan = fs.existsSync(path.join(dir, "PLAN.md"));
-				const hasLog = fs.existsSync(path.join(dir, "EXECUTION.md"));
+				const hasSpec = fs.existsSync(specPath(ctx.cwd, name));
+				const hasPlan = fs.existsSync(planPath(ctx.cwd, name));
+				const hasLog = fs.existsSync(logFilePath(ctx.cwd, name));
 				const icons = [
 					hasSpec ? "📄 SPEC" : null,
 					hasPlan ? "📋 PLAN" : null,

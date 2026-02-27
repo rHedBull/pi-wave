@@ -92,10 +92,6 @@ export function extractFinalOutput(jsonLines: string): string {
 
 // ── Path Helpers ───────────────────────────────────────────────────
 
-export function wavesBaseDir(cwd: string): string {
-	return path.join(cwd, ".pi", "waves");
-}
-
 export function slugify(text: string): string {
 	return text
 		.toLowerCase()
@@ -104,37 +100,47 @@ export function slugify(text: string): string {
 		.slice(0, 60);
 }
 
+function specDir(cwd: string): string {
+	return path.join(cwd, "docs", "spec");
+}
+
+function planDir(cwd: string): string {
+	return path.join(cwd, "docs", "plan");
+}
+
 export function waveProjectDir(cwd: string, name: string): string {
-	return path.join(wavesBaseDir(cwd), name);
+	// Used only for checking file presence — returns the plan dir for the project
+	return path.join(planDir(cwd), name);
 }
 
 export function specPath(cwd: string, name: string): string {
-	return path.join(waveProjectDir(cwd, name), "SPEC.md");
+	return path.join(specDir(cwd), name, "SPEC.md");
 }
 
 export function planPath(cwd: string, name: string): string {
-	return path.join(waveProjectDir(cwd, name), "PLAN.md");
+	return path.join(planDir(cwd), name, "PLAN.md");
 }
 
 export function logFilePath(cwd: string, name: string): string {
-	return path.join(waveProjectDir(cwd, name), "EXECUTION.md");
+	return path.join(planDir(cwd), name, "EXECUTION.md");
 }
 
 export function ensureProjectDir(cwd: string, name: string): void {
-	const dir = waveProjectDir(cwd, name);
-	if (!fs.existsSync(dir)) {
-		fs.mkdirSync(dir, { recursive: true });
-	}
+	const sd = path.join(specDir(cwd), name);
+	const pd = path.join(planDir(cwd), name);
+	if (!fs.existsSync(sd)) fs.mkdirSync(sd, { recursive: true });
+	if (!fs.existsSync(pd)) fs.mkdirSync(pd, { recursive: true });
 }
 
 export function listWaveProjects(cwd: string): string[] {
-	const base = wavesBaseDir(cwd);
-	if (!fs.existsSync(base)) return [];
-	return fs
-		.readdirSync(base, { withFileTypes: true })
-		.filter((d) => d.isDirectory())
-		.map((d) => d.name)
-		.sort();
+	const names = new Set<string>();
+	for (const dir of [specDir(cwd), planDir(cwd)]) {
+		if (!fs.existsSync(dir)) continue;
+		for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
+			if (d.isDirectory()) names.add(d.name);
+		}
+	}
+	return [...names].sort();
 }
 
 // ── File Access Enforcement ────────────────────────────────────────
