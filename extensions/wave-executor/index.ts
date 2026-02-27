@@ -19,6 +19,7 @@ import {
 	ensureProjectDir,
 	extractFinalOutput,
 	extractSpecSections,
+	findSpecFile,
 	listWaveProjects,
 	logFilePath,
 	planPath,
@@ -51,7 +52,7 @@ export default function (pi: ExtensionAPI) {
 
 			let summary = `**Wave projects** in \`docs/spec/\` and \`docs/plan/\`:\n\n`;
 			for (const name of projects) {
-				const hasSpec = fs.existsSync(specPath(ctx.cwd, name));
+				const hasSpec = !!findSpecFile(ctx.cwd, name);
 				const hasPlan = fs.existsSync(planPath(ctx.cwd, name));
 				const hasLog = fs.existsSync(logFilePath(ctx.cwd, name));
 				const icons = [
@@ -279,45 +280,57 @@ Now, start by presenting the scout findings and asking your first question.`;
 	// ── /waves-plan ──────────────────────────────────────────────────
 
 	pi.registerCommand("waves-plan", {
-		description: "Create PLAN.md for a wave project (e.g. /waves-plan add-oauth2-support)",
+		description: "Create PLAN.md for a wave project (e.g. /waves-plan my-spec.md or /waves-plan project-name)",
 		handler: async (args, ctx) => {
 			let projectName: string;
 			let extraInstructions: string;
+			let spec: string;
 
 			if (!args?.trim()) {
-				const localSpec = path.join(ctx.cwd, "SPEC.md");
-				if (fs.existsSync(localSpec)) {
+				// No args: try to find a spec in cwd or list known projects
+				const cwdSpec = findSpecFile(ctx.cwd, "SPEC.md");
+				if (cwdSpec) {
 					projectName = slugify(path.basename(ctx.cwd));
 					extraInstructions = "";
-					ensureProjectDir(ctx.cwd, projectName);
-					const waveSpec = specPath(ctx.cwd, projectName);
-					if (!fs.existsSync(waveSpec)) {
-						fs.copyFileSync(localSpec, waveSpec);
-					}
+					spec = cwdSpec;
 				} else {
 					const projects = listWaveProjects(ctx.cwd);
 					const ready = projects.filter((p) =>
-						fs.existsSync(specPath(ctx.cwd, p)) && !fs.existsSync(planPath(ctx.cwd, p))
+						findSpecFile(ctx.cwd, p) && !fs.existsSync(planPath(ctx.cwd, p))
 					);
 					if (ready.length > 0) {
-						ctx.ui.notify(`Usage: /waves-plan <name>\nReady for planning: ${ready.join(", ")}`, "info");
+						ctx.ui.notify(`Usage: /waves-plan <name-or-file>\nReady for planning: ${ready.join(", ")}`, "info");
 					} else if (projects.length > 0) {
-						ctx.ui.notify(`Usage: /waves-plan <name> [extra instructions]\nProjects: ${projects.join(", ")}`, "info");
+						ctx.ui.notify(`Usage: /waves-plan <name-or-file> [extra instructions]\nProjects: ${projects.join(", ")}`, "info");
 					} else {
-						ctx.ui.notify("No wave projects and no SPEC.md in current dir. Run /waves-spec <task> first.", "info");
+						ctx.ui.notify("No spec files found. Run /waves-spec <task> or provide a path to a spec file.", "info");
 					}
 					return;
 				}
 			} else {
 				const parts = args.trim().split(/\s+/);
-				projectName = slugify(parts[0]);
+				const firstArg = parts[0];
 				extraInstructions = parts.slice(1).join(" ");
-			}
 
-			const spec = specPath(ctx.cwd, projectName);
-			if (!fs.existsSync(spec)) {
-				ctx.ui.notify(`No SPEC.md found for "${projectName}". Run /waves-spec <task> first.`, "error");
-				return;
+				// Try to find a spec file from the argument
+				const found = findSpecFile(ctx.cwd, firstArg);
+				if (found) {
+					spec = found;
+					// Derive project name from the spec file or argument
+					const basename = path.basename(found, ".md").replace(/[-_]?spec[-_]?/gi, "").replace(/^-+|-+$/g, "");
+					projectName = slugify(basename || path.basename(path.dirname(found)));
+				} else {
+					ctx.ui.notify(
+						`No spec file found for "${firstArg}". Looked for:\n` +
+						`  • ${firstArg} (as file path)\n` +
+						`  • docs/spec/${slugify(firstArg)}/SPEC.md\n` +
+						`  • docs/spec/${slugify(firstArg)}/*.md\n` +
+						`  • docs/spec/${slugify(firstArg)}.md\n\n` +
+						`Run /waves-spec <task> or provide a path to a spec file.`,
+						"error",
+					);
+					return;
+				}
 			}
 
 			const extra = extraInstructions ? `\n\nAdditional instructions: ${extraInstructions}` : "";
@@ -400,12 +413,12 @@ You can read it back to verify the format is correct.`;
 	// ── /waves-execute ───────────────────────────────────────────────
 
 	pi.registerCommand("waves-execute", {
-		description: "Execute a wave project's PLAN.md (e.g. /waves-execute add-oauth2-support)",
+		description: "Execute a wave project's PLAN.md (e.g. /waves-execute project-name)",
 		handler: async (args, ctx) => {
 			if (!args?.trim()) {
 				const projects = listWaveProjects(ctx.cwd);
 				const ready = projects.filter((p) =>
-					fs.existsSync(specPath(ctx.cwd, p)) && fs.existsSync(planPath(ctx.cwd, p))
+					findSpecFile(ctx.cwd, p) && fs.existsSync(planPath(ctx.cwd, p))
 				);
 				if (ready.length > 0) {
 					ctx.ui.notify(`Usage: /waves-execute <name>\nReady to execute: ${ready.join(", ")}`, "info");
@@ -416,11 +429,11 @@ You can read it back to verify the format is correct.`;
 			}
 
 			const projectName = slugify(args.trim());
-			const spec = specPath(ctx.cwd, projectName);
+			const spec = findSpecFile(ctx.cwd, projectName);
 			const planFile = planPath(ctx.cwd, projectName);
 
-			if (!fs.existsSync(spec)) {
-				ctx.ui.notify(`No SPEC.md for "${projectName}". Run /waves-spec <task> first.`, "error");
+			if (!spec) {
+				ctx.ui.notify(`No spec file found for "${projectName}". Run /waves-spec <task> first.`, "error");
 				return;
 			}
 			if (!fs.existsSync(planFile)) {
