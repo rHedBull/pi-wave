@@ -280,6 +280,88 @@ Now, start by presenting the scout findings and asking your first question.`;
 
 	// ── /waves-plan ──────────────────────────────────────────────────
 
+	function buildPlanReviewPrompt(projectName: string, relSpec: string, relPlan: string, outlineOutput: string, extraInstructions: string): string {
+		return `# Plan Review: ${projectName}
+
+A planner agent has drafted an outline for the implementation plan. Your job is to **present it to the user for review**, focusing on:
+
+1. **Wave milestones** — what each wave delivers and whether the increments make sense
+2. **Feature parallelization** — which features run in parallel within each wave, and whether the grouping is right
+
+## Planner's Outline
+
+${outlineOutput}
+
+## Your Process
+
+1. **Present the outline clearly** — summarize the milestones and parallelization in a readable format. Highlight the key decisions.
+2. **Ask for feedback** — "Does this look right? Would you change the milestones, move features between waves, or group things differently?"
+3. **Iterate** — if the user has critiques, adjust the outline and present the updated version. Go back and forth until they're satisfied.
+4. **When approved** — read the spec at \`${relSpec}\` and write the full detailed implementation plan to \`${relPlan}\`.
+
+${extraInstructions ? `\n**Additional instructions from the user:** ${extraInstructions}\n` : ""}
+
+## Plan Format (when writing the final plan)
+
+The plan must follow this exact Markdown structure:
+
+\`\`\`markdown
+# Implementation Plan
+
+## Goal
+One sentence.
+
+## Reference
+- Spec: \`${relSpec}\`
+
+## TDD Approach
+Brief: framework, patterns, directory structure.
+
+---
+
+## Wave 1: <Milestone Name>
+Working state: <what "done" means>
+
+### Foundation
+Shared contracts committed before features branch.
+
+#### Task w1-found-t1: <title>
+- **Agent**: worker | test-writer | wave-verifier
+- **Files**: \`path/to/file\`
+- **Depends**: (task IDs, or omit if none)
+- **Tests**: \`path/to/test\` (for worker tasks)
+- **Spec refs**: FR-1, FR-2
+- **Description**: Detailed description with code hints (exact signatures, field names).
+
+### Feature: <name>
+Files: list of files this feature owns
+
+#### Task w1-<feature>-t1: <title>
+- **Agent**: ...
+- **Files**: ...
+- **Depends**: w1-<feature>-tN (within same feature only)
+- **Description**: ...
+
+### Integration
+
+#### Task w1-int-t1: <title>
+...
+\`\`\`
+
+**Task ID convention:** \`w{wave}-{feature}-t{num}\` (e.g., w1-auth-t1, w1-found-t2, w2-int-t1)
+
+**Rules:**
+- Features within a wave MUST NOT depend on each other or write to the same files
+- Task dependencies are within the same feature/section only
+- Every task description must repeat canonical field names and signatures (parallel agents can't see each other)
+- Foundation defines exact interfaces — agents just create the files
+- Integration wires features together and runs full verification
+- Target: 2-5 waves, 2-6 features per wave, 2-6 tasks per feature
+- All agents use \`permissionMode: fullAuto\`
+
+After writing, tell the user: "Next step: \`/waves-execute ${projectName}\`"`;
+	}
+
 	pi.registerCommand("waves-plan", {
 		description: "Create PLAN.md for a wave project (e.g. /waves-plan my-spec.md or /waves-plan project-name)",
 		handler: async (args, ctx) => {
@@ -335,79 +417,66 @@ Now, start by presenting the scout findings and asking your first question.`;
 			}
 
 			const extra = extraInstructions ? `\n\nAdditional instructions: ${extraInstructions}` : "";
-
-			ctx.ui.setStatus("waves", ctx.ui.theme.fg("warning", `📋 [${projectName}] Planning...`));
-			ensureProjectDir(ctx.cwd, projectName);
-			const file = planPath(ctx.cwd, projectName);
 			const relSpec = path.relative(ctx.cwd, spec);
-			const relPlan = path.relative(ctx.cwd, file);
 
-			const planTask = `Read the spec at \`${relSpec}\` and create a wave-based implementation plan.${extra}
+			// Phase 1: Run planner for outline only
+			ctx.ui.setStatus("waves", ctx.ui.theme.fg("warning", `📋 [${projectName}] Drafting outline...`));
 
-IMPORTANT: Write the plan directly to the file \`${relPlan}\`.
-Use the read tool to read the spec file first, then use the write tool to create the plan file.
-You can read it back to verify the format is correct.`;
+			const outlineTask = `Read the spec at \`${relSpec}\` and produce a **plan outline only** — NOT the full plan.${extra}
 
-			const planResult = await runSubagent("wave-planner", planTask, ctx.cwd, undefined, {
-				allowWrite: [file],
+Your output should be a structured outline covering:
+
+1. **Waves as milestones** — for each wave:
+   - Wave number and name
+   - What "working" means at wave end (the milestone)
+   - Foundation: what shared contracts/scaffolding are created
+
+2. **Feature parallelization** — for each wave:
+   - Which features run in parallel (and why they're independent)
+   - Files each feature owns
+   - Key task dependencies within each feature (e.g., test → implement → verify)
+
+3. **Integration** — for each wave:
+   - What glue work is needed after features merge
+   - What the integration verification covers
+
+Be concise but specific. Show the structure, not the full task descriptions.
+Do NOT write any files. Just output the outline as your response.`;
+
+			const outlineResult = await runSubagent("wave-planner", outlineTask, ctx.cwd, undefined, {
+				readOnly: true,
 				safeBashOnly: true,
 			});
 
+			const outlineOutput = extractFinalOutput(outlineResult.stdout);
+
 			ctx.ui.setStatus("waves", undefined);
 
-			if (planResult.exitCode !== 0) {
-				ctx.ui.notify("Planner failed: " + (planResult.stderr || "no output"), "error");
+			if (outlineResult.exitCode !== 0 || !outlineOutput) {
+				ctx.ui.notify("Planner outline failed: " + (outlineResult.stderr || "no output"), "error");
 				return;
 			}
 
-			if (!fs.existsSync(file)) {
-				ctx.ui.notify("Planner did not create PLAN.md", "error");
-				return;
-			}
+			// Phase 2: Present outline for review in main conversation
+			ensureProjectDir(ctx.cwd, projectName);
+			const file = planPath(ctx.cwd, projectName);
+			const relPlan = path.relative(ctx.cwd, file);
 
-			const planContent = fs.readFileSync(file, "utf-8");
-			const plan = parsePlanV2(planContent);
+			const reviewPrompt = buildPlanReviewPrompt(projectName, relSpec, relPlan, outlineOutput, extra);
 
-			// Count tasks across all sections
-			const totalTasks = plan.waves.reduce(
-				(s, w) => s + w.foundation.length + w.features.reduce((fs2, f) => fs2 + f.tasks.length, 0) + w.integration.length,
-				0,
-			);
-
-			let summary = `📋 **${projectName}/PLAN.md** created → \`${relPlan}\`\n\n`;
-			summary += `**${plan.waves.length} waves, ${totalTasks} tasks**\n\n`;
-
-			for (const wave of plan.waves) {
-				const allTasks = [
-					...wave.foundation,
-					...wave.features.flatMap((f) => f.tasks),
-					...wave.integration,
-				];
-				const testCount = allTasks.filter((t) => t.agent === "test-writer").length;
-				const implCount = allTasks.filter((t) => t.agent === "worker").length;
-				const verifyCount = allTasks.filter((t) => t.agent === "wave-verifier").length;
-				const parts2: string[] = [];
-				if (testCount) parts2.push(`🧪 ${testCount} test`);
-				if (implCount) parts2.push(`🔨 ${implCount} impl`);
-				if (verifyCount) parts2.push(`🔍 ${verifyCount} verify`);
-
-				const featureNames = wave.features
-					.filter((f) => f.name !== "default")
-					.map((f) => f.name);
-				const featureInfo = featureNames.length > 0
-					? ` — features: ${featureNames.join(", ")}`
-					: "";
-
-				summary += `- **${wave.name}**: ${parts2.join(", ")}${featureInfo}\n`;
-			}
-			summary += `\nReview and edit, then run \`/waves-execute ${projectName}\``;
+			ctx.ui.notify("📋 Outline ready. Review the milestones and parallelization...", "info");
 
 			pi.sendMessage(
-				{ customType: "wave-plan", content: summary, display: true },
-				{ triggerTurn: false },
+				{
+					customType: "wave-plan-review",
+					content: reviewPrompt,
+					display: false,
+				},
+				{
+					triggerTurn: true,
+					deliverAs: "followUp",
+				},
 			);
-
-			ctx.ui.notify(`PLAN.md → ${relPlan} — ${plan.waves.length} waves, ${totalTasks} tasks. Next: /waves-execute ${projectName}`, "info");
 		},
 	});
 
