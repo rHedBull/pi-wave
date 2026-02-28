@@ -39,6 +39,7 @@ import { executeWave } from "./wave-executor.js";
 // ── Config ─────────────────────────────────────────────────────────
 
 const MAX_CONCURRENCY = 12;
+const TASK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes per task
 
 // ── Extension ──────────────────────────────────────────────────────
 
@@ -589,7 +590,7 @@ Do NOT write any files. Just output the outline as your response.`;
 			// Build preview
 			let preview = `**${plan.goal || "Implementation"}**\n`;
 			preview += `${plan.waves.length} waves, ${totalTasks} tasks (🧪 ${testTasks} test, 🔨 ${implTasks} impl, 🔍 ${verifyTasks} verify)\n`;
-			preview += `Up to ${MAX_CONCURRENCY} parallel agents\n\n`;
+			preview += `Up to ${MAX_CONCURRENCY} parallel agents, ${TASK_TIMEOUT_MS / 60000}min timeout per task\n\n`;
 			for (const wave of plan.waves) {
 				const wTasks = [
 					...wave.foundation,
@@ -747,6 +748,7 @@ Do NOT write any files. Just output the outline as your response.`;
 					},
 					onTaskEnd: (phase, task, result) => {
 						taskStatuses.set(task.id,
+							result.timedOut ? "timeout" :
 							result.exitCode === 0 ? "done" :
 							result.exitCode === -1 ? "skipped" : "failed"
 						);
@@ -876,6 +878,7 @@ function statusIcon(ctx: any, status: string): string {
 	switch (status) {
 		case "done": return ctx.ui.theme.fg("success", "✓");
 		case "failed": return ctx.ui.theme.fg("error", "✗");
+		case "timeout": return ctx.ui.theme.fg("error", "⏰");
 		case "running": return ctx.ui.theme.fg("warning", "⏳");
 		case "fixing": return ctx.ui.theme.fg("warning", "🔧");
 		case "skipped": return ctx.ui.theme.fg("muted", "⏭");
@@ -918,6 +921,8 @@ function taskLine(
 		if (isFixing) {
 			line += ctx.ui.theme.fg("warning", " [fix cycle]");
 		}
+	} else if (status === "timeout") {
+		line += ctx.ui.theme.fg("error", " [timed out]");
 	}
 
 	return line;

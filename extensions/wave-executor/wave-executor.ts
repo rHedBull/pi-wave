@@ -408,8 +408,9 @@ IMPORTANT:
 		title: task.title,
 		agent: agentName,
 		exitCode: result.exitCode,
-		output: output || "(no output)",
+		output: result.timedOut ? `⏰ Task timed out\n${output}` : (output || "(no output)"),
 		stderr: result.stderr,
+		timedOut: result.timedOut,
 	};
 }
 
@@ -474,10 +475,11 @@ function logTaskResult(
 	result: TaskResult,
 ): void {
 	if (!onLog) return;
-	const icon = result.exitCode === 0 ? "✅" : result.exitCode === -1 ? "⏭️" : "❌";
+	const icon = result.timedOut ? "⏰" : result.exitCode === 0 ? "✅" : result.exitCode === -1 ? "⏭️" : "❌";
 	const agentEmoji =
 		task.agent === "test-writer" ? "🧪" : task.agent === "wave-verifier" ? "🔍" : "🔨";
-	onLog(`${icon} ${agentEmoji} **${task.id}** [${task.agent}]: ${task.title} (${(result.durationMs / 1000).toFixed(1)}s)`);
+	const suffix = result.timedOut ? " **TIMED OUT**" : "";
+	onLog(`${icon} ${agentEmoji} **${task.id}** [${task.agent}]: ${task.title} (${(result.durationMs / 1000).toFixed(1)}s)${suffix}`);
 	if (result.exitCode !== 0 && result.exitCode !== -1) {
 		onLog(`   Error: ${result.stderr.slice(0, 200)}`);
 	}

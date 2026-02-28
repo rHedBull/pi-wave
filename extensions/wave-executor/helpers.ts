@@ -388,12 +388,19 @@ export function cleanupEnforcement(filePath: string, dir: string): void {
 
 // ── Subagent Runner ────────────────────────────────────────────────
 
+/** Default per-task timeout: 10 minutes */
+export const DEFAULT_TASK_TIMEOUT_MS = 10 * 60 * 1000;
+
 /**
  * Spawn a pi subprocess for the given agent.
  *
  * Looks for agent definitions in:
  * 1. The package's own agents/ directory
  * 2. The global ~/.pi/agent/agents/ directory
+ *
+ * Enforces a per-task timeout (default: 10 minutes). If the agent
+ * doesn't complete within the timeout, it's killed and the task
+ * resolves with a non-zero exit code.
  */
 export function runSubagent(
 	agentName: string,
@@ -401,7 +408,8 @@ export function runSubagent(
 	cwd: string,
 	signal?: AbortSignal,
 	fileRules?: FileAccessRules,
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+	timeoutMs?: number,
+): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut?: boolean }> {
 	return new Promise((resolve) => {
 		const args = ["--mode", "json", "-p", "--no-session"];
 
@@ -433,8 +441,15 @@ export function runSubagent(
 
 		let stdout = "";
 		let stderr = "";
+		let resolved = false;
+		let timedOut = false;
 
 		const proc = spawn("pi", args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+
+		const cleanup = () => {
+			if (enforcement) cleanupEnforcement(enforcement.filePath, enforcement.dir);
+			clearTimeout(timer);
+		};
 
 		proc.stdout.on("data", (data) => {
 			stdout += data.toString();
@@ -444,23 +459,44 @@ export function runSubagent(
 		});
 
 		proc.on("close", (code) => {
-			if (enforcement) cleanupEnforcement(enforcement.filePath, enforcement.dir);
-			resolve({ exitCode: code ?? 1, stdout, stderr });
+			if (resolved) return;
+			resolved = true;
+			cleanup();
+			resolve({
+				exitCode: timedOut ? 124 : (code ?? 1),
+				stdout,
+				stderr: timedOut ? `Task timed out after ${Math.round((timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS) / 1000)}s\n${stderr}` : stderr,
+				timedOut,
+			});
 		});
 		proc.on("error", () => {
-			if (enforcement) cleanupEnforcement(enforcement.filePath, enforcement.dir);
+			if (resolved) return;
+			resolved = true;
+			cleanup();
 			resolve({ exitCode: 1, stdout, stderr: stderr || "Failed to spawn pi" });
 		});
 
+		// Kill helper — SIGTERM then SIGKILL after 5s
+		const killProc = () => {
+			proc.kill("SIGTERM");
+			setTimeout(() => {
+				if (!proc.killed) proc.kill("SIGKILL");
+			}, 5000);
+		};
+
+		// External abort signal (user cancellation)
 		if (signal) {
-			const kill = () => {
-				proc.kill("SIGTERM");
-				setTimeout(() => {
-					if (!proc.killed) proc.kill("SIGKILL");
-				}, 5000);
-			};
-			if (signal.aborted) kill();
-			else signal.addEventListener("abort", kill, { once: true });
+			if (signal.aborted) killProc();
+			else signal.addEventListener("abort", killProc, { once: true });
 		}
+
+		// Per-task timeout
+		const effectiveTimeout = timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS;
+		const timer = effectiveTimeout > 0
+			? setTimeout(() => {
+				timedOut = true;
+				killProc();
+			}, effectiveTimeout)
+			: undefined;
 	});
 }

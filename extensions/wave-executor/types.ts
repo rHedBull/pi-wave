@@ -46,6 +46,7 @@ export interface TaskResult {
 	output: string;
 	stderr: string;
 	durationMs: number;
+	timedOut?: boolean;
 }
 
 export interface FeatureResult {

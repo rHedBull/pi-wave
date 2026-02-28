@@ -295,8 +295,9 @@ IMPORTANT:
 		title: task.title,
 		agent: agentName,
 		exitCode: result.exitCode,
-		output: output || "(no output)",
+		output: result.timedOut ? `⏰ Task timed out\n${output}` : (output || "(no output)"),
 		stderr: result.stderr,
+		timedOut: result.timedOut,
 	};
 }
 
