@@ -293,12 +293,14 @@ export function extractSpecRef(planContent: string): string | null {
 
 // ── File Access Enforcement ────────────────────────────────────────
 
-export function generateEnforcementExtension(rules: FileAccessRules): string {
+export function generateEnforcementExtension(rules: FileAccessRules, stallSignalPath?: string): string {
 	return `
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import * as fs from "node:fs";
 import * as path from "node:path";
 
 const rules = ${JSON.stringify(rules)};
+const stallSignalPath = ${stallSignalPath ? JSON.stringify(stallSignalPath) : "null"};
 
 function matchesPattern(filePath, patterns) {
 	const normalized = path.resolve(filePath);
@@ -314,6 +316,23 @@ function matchesPattern(filePath, patterns) {
 
 export default function (pi) {
 	pi.on("tool_call", async (event) => {
+		// ── Stall interrupt: parent process detected a loop and wrote a signal file ──
+		if (stallSignalPath) {
+			try {
+				const reason = fs.readFileSync(stallSignalPath, "utf-8");
+				fs.unlinkSync(stallSignalPath);
+				return {
+					block: true,
+					reason: "⚠️ LOOP DETECTED: " + reason + "\\n\\nYou appear to be stuck in a loop repeating the same actions. "
+						+ "STOP and take a completely different approach. "
+						+ "If a command keeps failing, try an alternative. "
+						+ "If an edit keeps not working, re-read the file first and reconsider your strategy."
+				};
+			} catch {
+				// No signal file — continue normally
+			}
+		}
+
 		const toolName = event.toolName;
 		const filePath = event.input.path || event.input.file_path || "";
 
@@ -362,11 +381,12 @@ export function writeEnforcementExtension(
 	cwd: string,
 	taskId: string,
 	rules: FileAccessRules,
+	stallSignalPath?: string,
 ): { filePath: string; dir: string } {
 	const dir = path.join(os.tmpdir(), `pi-wave-enforce-${taskId}-${Date.now()}`);
 	fs.mkdirSync(dir, { recursive: true });
 	const filePath = path.join(dir, "enforce.ts");
-	fs.writeFileSync(filePath, generateEnforcementExtension(rules), {
+	fs.writeFileSync(filePath, generateEnforcementExtension(rules, stallSignalPath), {
 		encoding: "utf-8",
 		mode: 0o600,
 	});
@@ -391,11 +411,17 @@ export function cleanupEnforcement(filePath: string, dir: string): void {
 /** Default per-task timeout: 10 minutes */
 export const DEFAULT_TASK_TIMEOUT_MS = 10 * 60 * 1000;
 
-/** Stall detection: kill after N identical tool calls (same name + args) */
-export const STALL_MAX_IDENTICAL_CALLS = 3;
-
-/** Stall detection: kill after N consecutive tool errors */
-export const STALL_MAX_CONSECUTIVE_ERRORS = 6;
+/**
+ * Stall detection thresholds — two levels:
+ *
+ * Soft: interrupt the agent's next tool call via the enforcement extension
+ *       (agent stays alive, gets guidance to change approach)
+ * Hard: kill the process (caller retries with enriched context)
+ */
+export const STALL_SOFT_IDENTICAL_CALLS = 5;
+export const STALL_HARD_IDENTICAL_CALLS = 10;
+export const STALL_SOFT_CONSECUTIVE_ERRORS = 8;
+export const STALL_HARD_CONSECUTIVE_ERRORS = 14;
 
 export interface StallInfo {
 	reason: string;
@@ -418,11 +444,15 @@ export interface SubagentResult {
  * 2. The global ~/.pi/agent/agents/ directory
  *
  * Monitors the JSON event stream for stall patterns:
- * - Same tool called with identical args 3+ times → stuck in a loop
- * - 6+ consecutive tool errors → unable to make progress
+ * - Same tool called with identical args N times → stuck in a loop
+ * - N consecutive tool errors → unable to make progress
  *
- * On stall: kills the process and returns a StallInfo describing what happened.
- * Callers can retry the task with enriched context.
+ * Two-level response:
+ * 1. Soft interrupt (5 identical / 8 errors): writes a signal file that
+ *    the enforcement extension picks up — blocks the next tool call with
+ *    guidance to change approach. Agent stays alive.
+ * 2. Hard kill (10 identical / 14 errors): kills the process. Caller
+ *    retries with enriched context.
  *
  * Also enforces a hard timeout (default: 10 minutes) as a backstop.
  */
@@ -450,13 +480,17 @@ export function runSubagent(
 			args.push("--append-system-prompt", agentFile);
 		}
 
-		// Generate and load file access enforcement extension
+		// Stall signal file — bridge between parent (detector) and child (enforcement extension)
+		const stallSignalFile = path.join(os.tmpdir(), `pi-wave-stall-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.signal`);
+
+		// Generate and load file access enforcement extension (with stall signal support)
 		let enforcement: { filePath: string; dir: string } | null = null;
 		if (fileRules) {
 			enforcement = writeEnforcementExtension(
 				cwd,
 				agentName + "-" + Math.random().toString(36).slice(2, 8),
 				fileRules,
+				stallSignalFile,
 			);
 			args.push("-e", enforcement.filePath);
 		}
@@ -472,6 +506,7 @@ export function runSubagent(
 
 		// ── Stall detection state ──
 		let consecutiveErrors = 0;
+		let softInterruptSent = false;
 		const callCounts = new Map<string, number>();
 		const recentActivity: string[] = [];
 
@@ -482,7 +517,13 @@ export function runSubagent(
 			return JSON.stringify(toolArgs).slice(0, 120);
 		}
 
-		function checkStall(event: any): StallInfo | null {
+		/**
+		 * Check for stall patterns. Returns:
+		 * - "soft": write signal file (agent gets interrupted on next tool call)
+		 * - "hard": kill the process (caller retries)
+		 * - null: no stall
+		 */
+		function checkStall(event: any): { level: "soft" | "hard"; reason: string } | null {
 			if (event.type === "tool_execution_start") {
 				const summary = `${event.toolName}(${summarizeArgs(event.args)})`;
 				recentActivity.push(summary);
@@ -492,22 +533,22 @@ export function runSubagent(
 				const count = (callCounts.get(key) ?? 0) + 1;
 				callCounts.set(key, count);
 
-				if (count >= STALL_MAX_IDENTICAL_CALLS) {
-					return {
-						reason: `${event.toolName} called ${count} times with identical arguments`,
-						recentActivity: [...recentActivity],
-					};
+				if (count >= STALL_HARD_IDENTICAL_CALLS) {
+					return { level: "hard", reason: `${event.toolName} called ${count} times with identical arguments` };
+				}
+				if (count >= STALL_SOFT_IDENTICAL_CALLS && !softInterruptSent) {
+					return { level: "soft", reason: `${event.toolName} called ${count} times with identical arguments` };
 				}
 			}
 
 			if (event.type === "tool_execution_end") {
 				if (event.isError) {
 					consecutiveErrors++;
-					if (consecutiveErrors >= STALL_MAX_CONSECUTIVE_ERRORS) {
-						return {
-							reason: `${consecutiveErrors} consecutive tool errors`,
-							recentActivity: [...recentActivity],
-						};
+					if (consecutiveErrors >= STALL_HARD_CONSECUTIVE_ERRORS) {
+						return { level: "hard", reason: `${consecutiveErrors} consecutive tool errors` };
+					}
+					if (consecutiveErrors >= STALL_SOFT_CONSECUTIVE_ERRORS && !softInterruptSent) {
+						return { level: "soft", reason: `${consecutiveErrors} consecutive tool errors` };
 					}
 				} else {
 					consecutiveErrors = 0;
@@ -522,6 +563,8 @@ export function runSubagent(
 
 		const cleanup = () => {
 			if (enforcement) cleanupEnforcement(enforcement.filePath, enforcement.dir);
+			// Clean up stall signal file
+			try { fs.unlinkSync(stallSignalFile); } catch { /* ignore */ }
 			clearTimeout(timer);
 		};
 
@@ -538,10 +581,21 @@ export function runSubagent(
 				if (!line.trim()) continue;
 				try {
 					const event = JSON.parse(line);
-					const stallDetected = checkStall(event);
-					if (stallDetected && !stall && !timedOut) {
-						stall = stallDetected;
-						killProc();
+					const stallResult = checkStall(event);
+					if (stallResult && !timedOut) {
+						if (stallResult.level === "soft" && enforcement) {
+							// Soft interrupt: write signal file, enforcement extension blocks next tool call
+							softInterruptSent = true;
+							try {
+								fs.writeFileSync(stallSignalFile, stallResult.reason, "utf-8");
+							} catch { /* best effort */ }
+						} else if (stallResult.level === "hard" || (stallResult.level === "soft" && !enforcement)) {
+							// Hard kill: no enforcement extension or soft interrupt didn't help
+							if (!stall) {
+								stall = { reason: stallResult.reason, recentActivity: [...recentActivity] };
+								killProc();
+							}
+						}
 					}
 				} catch {
 					/* not JSON, skip */
@@ -589,7 +643,7 @@ export function runSubagent(
 			else signal.addEventListener("abort", killProc, { once: true });
 		}
 
-		// Per-task timeout (backstop — stall detection usually triggers first)
+		// Per-task timeout (backstop)
 		const effectiveTimeout = timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS;
 		const timer = effectiveTimeout > 0
 			? setTimeout(() => {
