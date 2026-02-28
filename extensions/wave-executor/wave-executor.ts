@@ -48,6 +48,8 @@ export interface WaveExecutorOptions {
 	onProgress?: (update: ProgressUpdate) => void;
 	onTaskStart?: (phase: string, task: Task) => void;
 	onTaskEnd?: (phase: string, task: Task, result: TaskResult) => void;
+	onFixCycleStart?: (phase: string, task: Task) => void;
+	onMergeResult?: (result: MergeResult) => void;
 	onLog?: (line: string) => void;
 }
 
@@ -65,6 +67,8 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 		onProgress,
 		onTaskStart,
 		onTaskEnd,
+		onFixCycleStart,
+		onMergeResult,
 		onLog,
 	} = opts;
 
@@ -192,6 +196,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 							onTaskEnd?.(`feature:${feature.name}`, task, tr);
 							logTaskResult(onLog, task, tr);
 						},
+						onFixCycleStart: (task) => onFixCycleStart?.(`feature:${feature.name}`, task),
 					});
 
 					featureStatuses[idx].status = result.passed ? "done" : "failed";
@@ -216,6 +221,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 					fResults.map((r) => ({ featureName: r.name, passed: r.passed })),
 				);
 
+				for (const mr of mergeResults) onMergeResult?.(mr);
 				logMergeResults(onLog, mergeResults);
 
 				const mergeConflicts = mergeResults.filter((m) => !m.success && m.hadChanges);
@@ -266,6 +272,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 
 					// Fix cycle for integration verifier failures
 					if (task.agent === "wave-verifier" && result.exitCode !== 0) {
+						onFixCycleStart?.("integration", task);
 						const fixResult = await runIntegrationFixCycle(
 							task,
 							result,

@@ -657,6 +657,10 @@ Do NOT write any files. Just output the outline as your response.`;
 				let completed = 0;
 				const taskStatuses = new Map<string, "pending" | "running" | "done" | "failed" | "skipped">();
 				for (const t of waveTasks) taskStatuses.set(t.id, "pending");
+				const taskStartTimes = new Map<string, number>();
+				const taskFixCycles = new Set<string>();
+				let currentPhase: string | null = null;
+				const mergeResults: import("./types.js").MergeResult[] = [];
 
 				const updateWidget = () => {
 					// Use the component factory form to bypass the MAX_WIDGET_LINES (10) truncation
@@ -670,7 +674,7 @@ Do NOT write any files. Just output the outline as your response.`;
 						if (wave.foundation.length > 0) {
 							container.addChild(new Text(theme.fg("dim", "  Foundation:"), 1, 0));
 							for (const t of wave.foundation) {
-								container.addChild(new Text(`    ${statusIcon(ctx, taskStatuses.get(t.id)!)} ${agentTag(t)} ${t.id}: ${t.title}`, 1, 0));
+								container.addChild(new Text(`    ${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles)}`, 1, 0));
 							}
 						}
 
@@ -681,7 +685,24 @@ Do NOT write any files. Just output the outline as your response.`;
 							}
 							for (const t of feature.tasks) {
 								const indent = feature.name !== "default" ? "    " : "  ";
-								container.addChild(new Text(`${indent}${statusIcon(ctx, taskStatuses.get(t.id)!)} ${agentTag(t)} ${t.id}: ${t.title}`, 1, 0));
+								container.addChild(new Text(`${indent}${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles)}`, 1, 0));
+							}
+						}
+
+						// Merge phase
+						if (currentPhase === "merge" && mergeResults.length === 0) {
+							container.addChild(new Text(theme.fg("dim", "  Merge:"), 1, 0));
+							container.addChild(new Text(`    ${theme.fg("warning", "⏳")} Merging feature branches...`, 1, 0));
+						} else if (mergeResults.length > 0) {
+							container.addChild(new Text(theme.fg("dim", "  Merge:"), 1, 0));
+							for (const mr of mergeResults) {
+								const icon = mr.success
+									? (mr.hadChanges ? theme.fg("success", "✓") : theme.fg("muted", "⏭"))
+									: theme.fg("error", "✗");
+								const label = mr.hadChanges
+									? `${mr.source} → ${mr.target}`
+									: `${mr.source} (no changes)`;
+								container.addChild(new Text(`    ${icon} ${label}`, 1, 0));
 							}
 						}
 
@@ -689,7 +710,7 @@ Do NOT write any files. Just output the outline as your response.`;
 						if (wave.integration.length > 0) {
 							container.addChild(new Text(theme.fg("dim", "  Integration:"), 1, 0));
 							for (const t of wave.integration) {
-								container.addChild(new Text(`    ${statusIcon(ctx, taskStatuses.get(t.id)!)} ${agentTag(t)} ${t.id}: ${t.title}`, 1, 0));
+								container.addChild(new Text(`    ${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles)}`, 1, 0));
 							}
 						}
 
@@ -703,6 +724,9 @@ Do NOT write any files. Just output the outline as your response.`;
 
 				updateWidget();
 
+				// Refresh timer to keep elapsed times updating
+				const refreshTimer = setInterval(updateWidget, 2000);
+
 				// Execute the wave
 				const waveResult = await executeWave({
 					wave,
@@ -713,16 +737,12 @@ Do NOT write any files. Just output the outline as your response.`;
 					maxConcurrency: MAX_CONCURRENCY,
 					signal: controller.signal,
 					onProgress: (update) => {
-						// Update feature statuses
-						if (update.features) {
-							for (const f of update.features) {
-								// Visual cue in the widget — handled per-task
-							}
-						}
+						currentPhase = update.phase;
 						updateWidget();
 					},
 					onTaskStart: (phase, task) => {
 						taskStatuses.set(task.id, "running");
+						taskStartTimes.set(task.id, Date.now());
 						updateWidget();
 					},
 					onTaskEnd: (phase, task, result) => {
@@ -730,11 +750,22 @@ Do NOT write any files. Just output the outline as your response.`;
 							result.exitCode === 0 ? "done" :
 							result.exitCode === -1 ? "skipped" : "failed"
 						);
+						taskFixCycles.delete(task.id);
 						completed++;
+						updateWidget();
+					},
+					onFixCycleStart: (phase, task) => {
+						taskFixCycles.add(task.id);
+						updateWidget();
+					},
+					onMergeResult: (result) => {
+						mergeResults.push(result);
 						updateWidget();
 					},
 					onLog: (line) => logLines.push(line),
 				});
+
+				clearInterval(refreshTimer);
 
 				totalCompleted += completed;
 				waveResults.push(waveResult);
@@ -846,6 +877,7 @@ function statusIcon(ctx: any, status: string): string {
 		case "done": return ctx.ui.theme.fg("success", "✓");
 		case "failed": return ctx.ui.theme.fg("error", "✗");
 		case "running": return ctx.ui.theme.fg("warning", "⏳");
+		case "fixing": return ctx.ui.theme.fg("warning", "🔧");
 		case "skipped": return ctx.ui.theme.fg("muted", "⏭");
 		default: return ctx.ui.theme.fg("muted", "○");
 	}
@@ -853,4 +885,40 @@ function statusIcon(ctx: any, status: string): string {
 
 function agentTag(t: Task): string {
 	return t.agent === "test-writer" ? "🧪" : t.agent === "wave-verifier" ? "🔍" : "🔨";
+}
+
+function formatElapsed(ms: number): string {
+	const seconds = Math.floor(ms / 1000);
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	const secs = seconds % 60;
+	return `${minutes}m ${secs.toString().padStart(2, "0")}s`;
+}
+
+function taskLine(
+	ctx: any,
+	t: Task,
+	statuses: Map<string, string>,
+	startTimes: Map<string, number>,
+	fixCycles: Set<string>,
+): string {
+	const status = statuses.get(t.id) ?? "pending";
+	const isFixing = fixCycles.has(t.id);
+	const icon = statusIcon(ctx, isFixing ? "fixing" : status);
+	const tag = agentTag(t);
+	let line = `${icon} ${tag} ${t.id}: ${t.title}`;
+
+	// Elapsed time for running tasks
+	if (status === "running") {
+		const startTime = startTimes.get(t.id);
+		if (startTime) {
+			const elapsed = formatElapsed(Date.now() - startTime);
+			line += ctx.ui.theme.fg("dim", ` (${elapsed})`);
+		}
+		if (isFixing) {
+			line += ctx.ui.theme.fg("warning", " [fix cycle]");
+		}
+	}
+
+	return line;
 }

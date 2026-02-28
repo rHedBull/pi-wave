@@ -42,6 +42,7 @@ export interface FeatureExecutorOptions {
 	signal?: AbortSignal;
 	onTaskStart?: (task: Task) => void;
 	onTaskEnd?: (task: Task, result: TaskResult) => void;
+	onFixCycleStart?: (task: Task) => void;
 }
 
 // ── Execute Feature ────────────────────────────────────────────────
@@ -58,6 +59,7 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 		signal,
 		onTaskStart,
 		onTaskEnd,
+		onFixCycleStart,
 	} = opts;
 
 	const featureCwd = featureWorktree?.dir ?? cwd;
@@ -137,6 +139,7 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 
 				// Fix cycle for verifier failures (max 1 retry)
 				if (task.agent === "wave-verifier" && result.exitCode !== 0) {
+					onFixCycleStart?.(task);
 					const fixResult = await runFixCycle(
 						task,
 						result,
