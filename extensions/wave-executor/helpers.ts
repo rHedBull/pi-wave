@@ -5,7 +5,7 @@
  * file access enforcement.
  */
 
-import { spawn } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -412,6 +412,31 @@ export function cleanupEnforcement(filePath: string, dir: string): void {
 export const DEFAULT_TASK_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
+ * Hanging tool timeout: if a single bash command produces no JSON events
+ * for this long, kill its child process (not the agent). The agent sees
+ * the command fail and continues. Catches dev servers, accidental
+ * `docker compose up`, etc. Long builds that complete within this window
+ * are unaffected.
+ */
+export const HANGING_TOOL_TIMEOUT_MS = 3 * 60 * 1000;
+
+/**
+ * Send SIGINT to all direct children of a process.
+ * Used to interrupt a hanging bash command without killing the pi agent.
+ */
+function interruptChildren(parentPid: number): void {
+	try {
+		const output = execSync(`pgrep -P ${parentPid}`, { encoding: "utf-8", timeout: 5000 });
+		for (const line of output.trim().split("\n")) {
+			const pid = parseInt(line, 10);
+			if (pid > 0) {
+				try { process.kill(pid, "SIGINT"); } catch { /* already exited */ }
+			}
+		}
+	} catch { /* pgrep unavailable or no children — nothing to interrupt */ }
+}
+
+/**
  * Stall detection thresholds — two levels:
  *
  * Soft: interrupt the agent's next tool call via the enforcement extension
@@ -561,10 +586,17 @@ export function runSubagent(
 		// ── Process ──
 		const proc = spawn("pi", args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
 
+		// ── Hanging tool detection ──
+		// A single bash command that never returns (dev server, accidental
+		// docker-compose up, etc). We kill its child process, not the agent.
+		let hangingToolTimer: ReturnType<typeof setTimeout> | undefined;
+		let hangingToolCommand: string | undefined;
+
 		const cleanup = () => {
 			if (enforcement) cleanupEnforcement(enforcement.filePath, enforcement.dir);
 			// Clean up stall signal file
 			try { fs.unlinkSync(stallSignalFile); } catch { /* ignore */ }
+			clearTimeout(hangingToolTimer);
 			clearTimeout(timer);
 		};
 
@@ -581,6 +613,32 @@ export function runSubagent(
 				if (!line.trim()) continue;
 				try {
 					const event = JSON.parse(line);
+
+					// ── Hanging tool timer ──
+					if (event.type === "tool_execution_start" && event.toolName === "bash") {
+						hangingToolCommand = (event.args?.command ?? event.input?.command ?? "").slice(0, 120);
+						clearTimeout(hangingToolTimer);
+						hangingToolTimer = setTimeout(() => {
+							// Kill the child process (the bash command), not the agent
+							interruptChildren(proc.pid);
+							// Write signal file so the agent gets guidance on its next tool call
+							if (enforcement) {
+								try {
+									fs.writeFileSync(stallSignalFile,
+										`bash command running for ${HANGING_TOOL_TIMEOUT_MS / 60000} minutes without completing: "${hangingToolCommand}". ` +
+										`This appears to be a long-running or never-returning command (like a dev server). ` +
+										`Do NOT re-run it. If you need to start a server, use a background process or skip it.`,
+										"utf-8");
+								} catch { /* best effort */ }
+							}
+						}, HANGING_TOOL_TIMEOUT_MS);
+					}
+					if (event.type === "tool_execution_end") {
+						clearTimeout(hangingToolTimer);
+						hangingToolCommand = undefined;
+					}
+
+					// ── Pattern-based stall detection ──
 					const stallResult = checkStall(event);
 					if (stallResult && !timedOut) {
 						if (stallResult.level === "soft" && enforcement) {
