@@ -14,6 +14,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Container, Text } from "@mariozechner/pi-tui";
 import { validateDAG } from "./dag.js";
 import {
 	ensureProjectDir,
@@ -658,41 +659,46 @@ Do NOT write any files. Just output the outline as your response.`;
 				for (const t of waveTasks) taskStatuses.set(t.id, "pending");
 
 				const updateWidget = () => {
-					const lines: string[] = [
-						ctx.ui.theme.fg("accent", `⚡ ${waveLabel} — ${completed}/${waveTasks.length} done`),
-					];
+					// Use the component factory form to bypass the MAX_WIDGET_LINES (10) truncation
+					// that applies to string arrays. Wave progress needs all lines visible.
+					ctx.ui.setWidget("wave-progress", (_tui, theme) => {
+						const container = new Container();
 
-					// Foundation tasks
-					if (wave.foundation.length > 0) {
-						lines.push(ctx.ui.theme.fg("dim", "  Foundation:"));
-						for (const t of wave.foundation) {
-							lines.push(`    ${statusIcon(ctx, taskStatuses.get(t.id)!)} ${agentTag(t)} ${t.id}: ${t.title}`);
-						}
-					}
+						container.addChild(new Text(theme.fg("accent", `⚡ ${waveLabel} — ${completed}/${waveTasks.length} done`), 1, 0));
 
-					// Feature tasks
-					for (const feature of wave.features) {
-						if (feature.name !== "default") {
-							lines.push(ctx.ui.theme.fg("dim", `  Feature: ${feature.name}`));
+						// Foundation tasks
+						if (wave.foundation.length > 0) {
+							container.addChild(new Text(theme.fg("dim", "  Foundation:"), 1, 0));
+							for (const t of wave.foundation) {
+								container.addChild(new Text(`    ${statusIcon(ctx, taskStatuses.get(t.id)!)} ${agentTag(t)} ${t.id}: ${t.title}`, 1, 0));
+							}
 						}
-						for (const t of feature.tasks) {
-							const indent = feature.name !== "default" ? "    " : "  ";
-							lines.push(`${indent}${statusIcon(ctx, taskStatuses.get(t.id)!)} ${agentTag(t)} ${t.id}: ${t.title}`);
-						}
-					}
 
-					// Integration tasks
-					if (wave.integration.length > 0) {
-						lines.push(ctx.ui.theme.fg("dim", "  Integration:"));
-						for (const t of wave.integration) {
-							lines.push(`    ${statusIcon(ctx, taskStatuses.get(t.id)!)} ${agentTag(t)} ${t.id}: ${t.title}`);
+						// Feature tasks
+						for (const feature of wave.features) {
+							if (feature.name !== "default") {
+								container.addChild(new Text(theme.fg("dim", `  Feature: ${feature.name}`), 1, 0));
+							}
+							for (const t of feature.tasks) {
+								const indent = feature.name !== "default" ? "    " : "  ";
+								container.addChild(new Text(`${indent}${statusIcon(ctx, taskStatuses.get(t.id)!)} ${agentTag(t)} ${t.id}: ${t.title}`, 1, 0));
+							}
 						}
-					}
 
-					const overallDone = totalCompleted + completed;
-					lines.push("");
-					lines.push(ctx.ui.theme.fg("dim", `Overall: ${overallDone}/${totalTasks} tasks`));
-					ctx.ui.setWidget("wave-progress", lines);
+						// Integration tasks
+						if (wave.integration.length > 0) {
+							container.addChild(new Text(theme.fg("dim", "  Integration:"), 1, 0));
+							for (const t of wave.integration) {
+								container.addChild(new Text(`    ${statusIcon(ctx, taskStatuses.get(t.id)!)} ${agentTag(t)} ${t.id}: ${t.title}`, 1, 0));
+							}
+						}
+
+						const overallDone = totalCompleted + completed;
+						container.addChild(new Text("", 0, 0));
+						container.addChild(new Text(theme.fg("dim", `Overall: ${overallDone}/${totalTasks} tasks`), 1, 0));
+
+						return container;
+					});
 				};
 
 				updateWidget();
