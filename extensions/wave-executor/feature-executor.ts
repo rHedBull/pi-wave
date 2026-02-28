@@ -43,6 +43,7 @@ export interface FeatureExecutorOptions {
 	onTaskStart?: (task: Task) => void;
 	onTaskEnd?: (task: Task, result: TaskResult) => void;
 	onFixCycleStart?: (task: Task) => void;
+	onStallRetry?: (task: Task, reason: string) => void;
 }
 
 // ── Execute Feature ────────────────────────────────────────────────
@@ -60,6 +61,7 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 		onTaskStart,
 		onTaskEnd,
 		onFixCycleStart,
+		onStallRetry,
 	} = opts;
 
 	const featureCwd = featureWorktree?.dir ?? cwd;
@@ -129,7 +131,7 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 					if (sw) taskCwd = sw.dir;
 				}
 
-				const result = await runSingleTask(task, taskCwd, specContent, protectedPaths, signal);
+				const result = await runSingleTask(task, taskCwd, specContent, protectedPaths, signal, onStallRetry);
 				const elapsed = Date.now() - start;
 
 				let taskResult: TaskResult = {
@@ -195,6 +197,7 @@ async function runSingleTask(
 	specContent: string,
 	protectedPaths: string[],
 	signal?: AbortSignal,
+	onStallRetry?: (task: Task, reason: string) => void,
 ): Promise<Omit<TaskResult, "durationMs">> {
 	const agentName = task.agent || "worker";
 	const specContext = extractSpecSections(specContent, task.specRefs);
@@ -287,7 +290,22 @@ IMPORTANT:
 		};
 	}
 
-	const result = await runSubagent(agentName, agentTask, cwd, signal, fileRules);
+	let result = await runSubagent(agentName, agentTask, cwd, signal, fileRules);
+
+	// Stall retry: if agent got stuck in a loop, interrupt and retry with guidance
+	if (result.stall) {
+		onStallRetry?.(task, result.stall.reason);
+		const stallContext = [
+			`\n\n⚠️ IMPORTANT: A previous attempt at this task got stuck.`,
+			`Reason: ${result.stall.reason}`,
+			`Recent activity before interruption:`,
+			...result.stall.recentActivity.map((a) => `  - ${a}`),
+			`\nYou MUST take a different approach. Do not repeat the same actions.`,
+			`The previous agent's partial work may already be on disk — check what exists before starting.`,
+		].join("\n");
+		result = await runSubagent(agentName, agentTask + stallContext, cwd, signal, fileRules);
+	}
+
 	const output = extractFinalOutput(result.stdout);
 
 	return {

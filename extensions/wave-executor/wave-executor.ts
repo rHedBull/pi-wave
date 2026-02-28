@@ -49,6 +49,7 @@ export interface WaveExecutorOptions {
 	onTaskStart?: (phase: string, task: Task) => void;
 	onTaskEnd?: (phase: string, task: Task, result: TaskResult) => void;
 	onFixCycleStart?: (phase: string, task: Task) => void;
+	onStallRetry?: (phase: string, task: Task, reason: string) => void;
 	onMergeResult?: (result: MergeResult) => void;
 	onLog?: (line: string) => void;
 }
@@ -68,6 +69,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 		onTaskStart,
 		onTaskEnd,
 		onFixCycleStart,
+		onStallRetry,
 		onMergeResult,
 		onLog,
 	} = opts;
@@ -99,7 +101,8 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 				async (task) => {
 					onTaskStart?.("foundation", task);
 					const start = Date.now();
-					const result = await runTaskOnBase(task, cwd, specContent, protectedPaths, signal);
+					const result = await runTaskOnBase(task, cwd, specContent, protectedPaths, signal,
+						(t, reason) => onStallRetry?.("foundation", t, reason));
 					const taskResult: TaskResult = { ...result, durationMs: Date.now() - start };
 					onTaskEnd?.("foundation", task, taskResult);
 					logTaskResult(onLog, task, taskResult);
@@ -197,6 +200,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 							logTaskResult(onLog, task, tr);
 						},
 						onFixCycleStart: (task) => onFixCycleStart?.(`feature:${feature.name}`, task),
+						onStallRetry: (task, reason) => onStallRetry?.(`feature:${feature.name}`, task, reason),
 					});
 
 					featureStatuses[idx].status = result.passed ? "done" : "failed";
@@ -267,7 +271,8 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 				async (task) => {
 					onTaskStart?.("integration", task);
 					const start = Date.now();
-					const result = await runTaskOnBase(task, cwd, specContent, protectedPaths, signal);
+					const result = await runTaskOnBase(task, cwd, specContent, protectedPaths, signal,
+						(t, reason) => onStallRetry?.("integration", t, reason));
 					let taskResult: TaskResult = { ...result, durationMs: Date.now() - start };
 
 					// Fix cycle for integration verifier failures
@@ -327,6 +332,7 @@ async function runTaskOnBase(
 	specContent: string,
 	protectedPaths: string[],
 	signal?: AbortSignal,
+	onStallRetry?: (task: Task, reason: string) => void,
 ): Promise<Omit<TaskResult, "durationMs">> {
 	const agentName = task.agent || "worker";
 	const specContext = extractSpecSections(specContent, task.specRefs);
@@ -400,7 +406,22 @@ IMPORTANT:
 		};
 	}
 
-	const result = await runSubagent(agentName, agentTask, cwd, signal, fileRules);
+	let result = await runSubagent(agentName, agentTask, cwd, signal, fileRules);
+
+	// Stall retry: if agent got stuck in a loop, interrupt and retry with guidance
+	if (result.stall) {
+		onStallRetry?.(task, result.stall.reason);
+		const stallContext = [
+			`\n\n⚠️ IMPORTANT: A previous attempt at this task got stuck.`,
+			`Reason: ${result.stall.reason}`,
+			`Recent activity before interruption:`,
+			...result.stall.recentActivity.map((a) => `  - ${a}`),
+			`\nYou MUST take a different approach. Do not repeat the same actions.`,
+			`The previous agent's partial work may already be on disk — check what exists before starting.`,
+		].join("\n");
+		result = await runSubagent(agentName, agentTask + stallContext, cwd, signal, fileRules);
+	}
+
 	const output = extractFinalOutput(result.stdout);
 
 	return {
@@ -450,7 +471,7 @@ Fix the issues and ensure all tests pass.`;
 		protectedPaths,
 	});
 
-	// Re-verify
+	// Re-verify (no stall callback — this is already inside a fix cycle)
 	const reResult = await runTaskOnBase(verifierTask, cwd, specContent, protectedPaths, signal);
 
 	let passed = reResult.exitCode === 0;

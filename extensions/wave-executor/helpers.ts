@@ -391,6 +391,25 @@ export function cleanupEnforcement(filePath: string, dir: string): void {
 /** Default per-task timeout: 10 minutes */
 export const DEFAULT_TASK_TIMEOUT_MS = 10 * 60 * 1000;
 
+/** Stall detection: kill after N identical tool calls (same name + args) */
+export const STALL_MAX_IDENTICAL_CALLS = 3;
+
+/** Stall detection: kill after N consecutive tool errors */
+export const STALL_MAX_CONSECUTIVE_ERRORS = 6;
+
+export interface StallInfo {
+	reason: string;
+	recentActivity: string[];
+}
+
+export interface SubagentResult {
+	exitCode: number;
+	stdout: string;
+	stderr: string;
+	timedOut?: boolean;
+	stall?: StallInfo;
+}
+
 /**
  * Spawn a pi subprocess for the given agent.
  *
@@ -398,9 +417,14 @@ export const DEFAULT_TASK_TIMEOUT_MS = 10 * 60 * 1000;
  * 1. The package's own agents/ directory
  * 2. The global ~/.pi/agent/agents/ directory
  *
- * Enforces a per-task timeout (default: 10 minutes). If the agent
- * doesn't complete within the timeout, it's killed and the task
- * resolves with a non-zero exit code.
+ * Monitors the JSON event stream for stall patterns:
+ * - Same tool called with identical args 3+ times → stuck in a loop
+ * - 6+ consecutive tool errors → unable to make progress
+ *
+ * On stall: kills the process and returns a StallInfo describing what happened.
+ * Callers can retry the task with enriched context.
+ *
+ * Also enforces a hard timeout (default: 10 minutes) as a backstop.
  */
 export function runSubagent(
 	agentName: string,
@@ -409,7 +433,7 @@ export function runSubagent(
 	signal?: AbortSignal,
 	fileRules?: FileAccessRules,
 	timeoutMs?: number,
-): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut?: boolean }> {
+): Promise<SubagentResult> {
 	return new Promise((resolve) => {
 		const args = ["--mode", "json", "-p", "--no-session"];
 
@@ -441,9 +465,59 @@ export function runSubagent(
 
 		let stdout = "";
 		let stderr = "";
+		let lineBuffer = "";
 		let resolved = false;
 		let timedOut = false;
+		let stall: StallInfo | undefined;
 
+		// ── Stall detection state ──
+		let consecutiveErrors = 0;
+		const callCounts = new Map<string, number>();
+		const recentActivity: string[] = [];
+
+		function summarizeArgs(toolArgs: any): string {
+			if (!toolArgs) return "";
+			if (toolArgs.command) return toolArgs.command.slice(0, 120);
+			if (toolArgs.path) return toolArgs.path;
+			return JSON.stringify(toolArgs).slice(0, 120);
+		}
+
+		function checkStall(event: any): StallInfo | null {
+			if (event.type === "tool_execution_start") {
+				const summary = `${event.toolName}(${summarizeArgs(event.args)})`;
+				recentActivity.push(summary);
+				if (recentActivity.length > 15) recentActivity.shift();
+
+				const key = `${event.toolName}:${JSON.stringify(event.args ?? {})}`;
+				const count = (callCounts.get(key) ?? 0) + 1;
+				callCounts.set(key, count);
+
+				if (count >= STALL_MAX_IDENTICAL_CALLS) {
+					return {
+						reason: `${event.toolName} called ${count} times with identical arguments`,
+						recentActivity: [...recentActivity],
+					};
+				}
+			}
+
+			if (event.type === "tool_execution_end") {
+				if (event.isError) {
+					consecutiveErrors++;
+					if (consecutiveErrors >= STALL_MAX_CONSECUTIVE_ERRORS) {
+						return {
+							reason: `${consecutiveErrors} consecutive tool errors`,
+							recentActivity: [...recentActivity],
+						};
+					}
+				} else {
+					consecutiveErrors = 0;
+				}
+			}
+
+			return null;
+		}
+
+		// ── Process ──
 		const proc = spawn("pi", args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
 
 		const cleanup = () => {
@@ -452,7 +526,27 @@ export function runSubagent(
 		};
 
 		proc.stdout.on("data", (data) => {
-			stdout += data.toString();
+			const chunk = data.toString();
+			stdout += chunk;
+
+			// Parse JSON lines incrementally for stall detection
+			lineBuffer += chunk;
+			const lines = lineBuffer.split("\n");
+			lineBuffer = lines.pop() || "";
+
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				try {
+					const event = JSON.parse(line);
+					const stallDetected = checkStall(event);
+					if (stallDetected && !stall && !timedOut) {
+						stall = stallDetected;
+						killProc();
+					}
+				} catch {
+					/* not JSON, skip */
+				}
+			}
 		});
 		proc.stderr.on("data", (data) => {
 			stderr += data.toString();
@@ -463,10 +557,15 @@ export function runSubagent(
 			resolved = true;
 			cleanup();
 			resolve({
-				exitCode: timedOut ? 124 : (code ?? 1),
+				exitCode: stall ? 125 : timedOut ? 124 : (code ?? 1),
 				stdout,
-				stderr: timedOut ? `Task timed out after ${Math.round((timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS) / 1000)}s\n${stderr}` : stderr,
+				stderr: timedOut
+					? `Task timed out after ${Math.round((timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS) / 1000)}s\n${stderr}`
+					: stall
+						? `Agent stalled: ${stall.reason}\n${stderr}`
+						: stderr,
 				timedOut,
+				stall,
 			});
 		});
 		proc.on("error", () => {
@@ -490,7 +589,7 @@ export function runSubagent(
 			else signal.addEventListener("abort", killProc, { once: true });
 		}
 
-		// Per-task timeout
+		// Per-task timeout (backstop — stall detection usually triggers first)
 		const effectiveTimeout = timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS;
 		const timer = effectiveTimeout > 0
 			? setTimeout(() => {

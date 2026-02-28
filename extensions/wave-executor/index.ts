@@ -660,6 +660,7 @@ Do NOT write any files. Just output the outline as your response.`;
 				for (const t of waveTasks) taskStatuses.set(t.id, "pending");
 				const taskStartTimes = new Map<string, number>();
 				const taskFixCycles = new Set<string>();
+				const taskStallRetries = new Set<string>();
 				let currentPhase: string | null = null;
 				const mergeResults: import("./types.js").MergeResult[] = [];
 
@@ -675,7 +676,7 @@ Do NOT write any files. Just output the outline as your response.`;
 						if (wave.foundation.length > 0) {
 							container.addChild(new Text(theme.fg("dim", "  Foundation:"), 1, 0));
 							for (const t of wave.foundation) {
-								container.addChild(new Text(`    ${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles)}`, 1, 0));
+								container.addChild(new Text(`    ${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles, taskStallRetries)}`, 1, 0));
 							}
 						}
 
@@ -686,7 +687,7 @@ Do NOT write any files. Just output the outline as your response.`;
 							}
 							for (const t of feature.tasks) {
 								const indent = feature.name !== "default" ? "    " : "  ";
-								container.addChild(new Text(`${indent}${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles)}`, 1, 0));
+								container.addChild(new Text(`${indent}${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles, taskStallRetries)}`, 1, 0));
 							}
 						}
 
@@ -711,7 +712,7 @@ Do NOT write any files. Just output the outline as your response.`;
 						if (wave.integration.length > 0) {
 							container.addChild(new Text(theme.fg("dim", "  Integration:"), 1, 0));
 							for (const t of wave.integration) {
-								container.addChild(new Text(`    ${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles)}`, 1, 0));
+								container.addChild(new Text(`    ${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles, taskStallRetries)}`, 1, 0));
 							}
 						}
 
@@ -758,6 +759,12 @@ Do NOT write any files. Just output the outline as your response.`;
 					},
 					onFixCycleStart: (phase, task) => {
 						taskFixCycles.add(task.id);
+						updateWidget();
+					},
+					onStallRetry: (phase, task, reason) => {
+						taskStallRetries.add(task.id);
+						// Reset start time for the retry attempt
+						taskStartTimes.set(task.id, Date.now());
 						updateWidget();
 					},
 					onMergeResult: (result) => {
@@ -880,6 +887,7 @@ function statusIcon(ctx: any, status: string): string {
 		case "failed": return ctx.ui.theme.fg("error", "✗");
 		case "timeout": return ctx.ui.theme.fg("error", "⏰");
 		case "running": return ctx.ui.theme.fg("warning", "⏳");
+		case "retrying": return ctx.ui.theme.fg("warning", "🔄");
 		case "fixing": return ctx.ui.theme.fg("warning", "🔧");
 		case "skipped": return ctx.ui.theme.fg("muted", "⏭");
 		default: return ctx.ui.theme.fg("muted", "○");
@@ -904,10 +912,13 @@ function taskLine(
 	statuses: Map<string, string>,
 	startTimes: Map<string, number>,
 	fixCycles: Set<string>,
+	stallRetries: Set<string>,
 ): string {
 	const status = statuses.get(t.id) ?? "pending";
 	const isFixing = fixCycles.has(t.id);
-	const icon = statusIcon(ctx, isFixing ? "fixing" : status);
+	const isRetrying = stallRetries.has(t.id);
+	const effectiveStatus = isRetrying ? "retrying" : isFixing ? "fixing" : status;
+	const icon = statusIcon(ctx, effectiveStatus);
 	const tag = agentTag(t);
 	let line = `${icon} ${tag} ${t.id}: ${t.title}`;
 
@@ -918,7 +929,9 @@ function taskLine(
 			const elapsed = formatElapsed(Date.now() - startTime);
 			line += ctx.ui.theme.fg("dim", ` (${elapsed})`);
 		}
-		if (isFixing) {
+		if (isRetrying) {
+			line += ctx.ui.theme.fg("warning", " [stall → retry]");
+		} else if (isFixing) {
 			line += ctx.ui.theme.fg("warning", " [fix cycle]");
 		}
 	} else if (status === "timeout") {
