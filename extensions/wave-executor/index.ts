@@ -6,6 +6,7 @@
  *   /waves-spec <task>    — Scout + brainstorm → creates SPEC.md
  *   /waves-plan           — Reads SPEC.md → creates PLAN.md (wave-based tasks)
  *   /waves-execute        — Reads SPEC.md + PLAN.md → wave-executes with verification
+ *   /waves-continue       — Resume a failed execution from where it left off
  *
  * Files are written to docs/spec/ and docs/plan/ in the project directory
  * so you can review, edit, and version control them before executing.
@@ -16,6 +17,18 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Container, Text } from "@mariozechner/pi-tui";
 import { validateDAG } from "./dag.js";
+import {
+	advanceToWave,
+	completedTaskIds,
+	createInitialState,
+	deleteState,
+	markTaskDone,
+	markTaskFailed,
+	markTaskSkipped,
+	readState,
+	stateFilePath,
+	writeState,
+} from "./state.js";
 import {
 	ensureProjectDir,
 	extractFinalOutput,
@@ -642,7 +655,12 @@ Do NOT write any files. Just output the outline as your response.`;
 			// Protected paths — don't let agents modify the spec or plan during execution
 			const protectedPaths = [planFile, ...(spec ? [spec] : [])];
 
+			// Execution state for resume capability
+			const execState = createInitialState(planFile);
+			writeState(planFile, execState);
+
 			for (let wi = 0; wi < plan.waves.length; wi++) {
+				advanceToWave(execState, wi);
 				const wave = plan.waves[wi];
 				const waveLabel = `Wave ${wi + 1}/${plan.waves.length}: ${wave.name}`;
 				const waveTasks = [
@@ -755,6 +773,11 @@ Do NOT write any files. Just output the outline as your response.`;
 						);
 						taskFixCycles.delete(task.id);
 						completed++;
+						// Persist task state for resume
+						if (result.exitCode === 0) markTaskDone(execState, task.id);
+						else if (result.exitCode === -1) markTaskSkipped(execState, task.id);
+						else markTaskFailed(execState, task.id);
+						writeState(planFile, execState);
 						updateWidget();
 					},
 					onFixCycleStart: (phase, task) => {
@@ -843,6 +866,11 @@ Do NOT write any files. Just output the outline as your response.`;
 			logLines.push(`Result: ${allPassed ? "SUCCESS" : "COMPLETED WITH ISSUES"}`);
 			writeLog();
 
+			// Clean up state file on full success, keep it on failure for /waves-continue
+			if (allPassed) {
+				deleteState(planFile);
+			}
+
 			const icon = allPassed ? "✅" : "⚠️";
 			let finalSummary = `# ${icon} Execution Complete\n\n`;
 			finalSummary += `**Goal:** ${plan.goal}\n`;
@@ -873,6 +901,337 @@ Do NOT write any files. Just output the outline as your response.`;
 			ctx.ui.setStatus("waves", allPassed
 				? ctx.ui.theme.fg("success", `✅ Done — ${totalCompleted} tasks`)
 				: ctx.ui.theme.fg("warning", `⚠️ Done (issues) — ${totalCompleted} tasks`),
+			);
+			setTimeout(() => ctx.ui.setStatus("waves", undefined), 15000);
+		},
+	});
+
+	// ── /waves-continue ──────────────────────────────────────────────
+
+	pi.registerCommand("waves-continue", {
+		description: "Resume a failed wave execution from where it left off",
+		handler: async (args, ctx) => {
+			if (!args?.trim()) {
+				// Find plan files with state files
+				const projects = listWaveProjects(ctx.cwd);
+				const resumable: string[] = [];
+				for (const p of projects) {
+					const pf = findPlanFile(ctx.cwd, p);
+					if (pf && fs.existsSync(stateFilePath(pf))) {
+						resumable.push(path.relative(ctx.cwd, pf));
+					}
+				}
+				if (resumable.length > 0) {
+					ctx.ui.notify(`Usage: /waves-continue <plan-file-or-project>\n\nResumable:\n${resumable.map((f) => `  ${f}`).join("\n")}`, "info");
+				} else {
+					ctx.ui.notify("No resumable executions found. State files are created during /waves-execute and removed on success.", "info");
+				}
+				return;
+			}
+
+			// Resolve plan file (same logic as /waves-execute)
+			let planFile: string | null = null;
+			let projectName: string;
+			const input = args.trim();
+
+			const asPath = path.resolve(ctx.cwd, input);
+			if (fs.existsSync(asPath) && fs.statSync(asPath).isFile()) {
+				planFile = asPath;
+				projectName = projectSlug(path.basename(asPath));
+			} else {
+				projectName = resolveProject(ctx.cwd, input);
+				planFile = findPlanFile(ctx.cwd, projectName);
+			}
+
+			if (!planFile) {
+				ctx.ui.notify(`No plan file found for "${input}".`, "error");
+				return;
+			}
+
+			// Load state
+			const prevState = readState(planFile);
+			if (!prevState) {
+				ctx.ui.notify(
+					`No execution state found for this plan. Nothing to resume.\n` +
+					`State file expected at: ${stateFilePath(planFile)}\n\n` +
+					`Run /waves-execute first, or if a previous run completed successfully, there's nothing to resume.`,
+					"info",
+				);
+				return;
+			}
+
+			const skipSet = completedTaskIds(prevState);
+			const resumeWave = prevState.currentWave;
+
+			// Load plan
+			const planContent = fs.readFileSync(planFile, "utf-8");
+			const plan = parsePlanV2(planContent);
+
+			if (plan.waves.length === 0) {
+				ctx.ui.notify("Plan has no waves.", "error");
+				return;
+			}
+
+			// Validate DAGs (same as /waves-execute)
+			for (const wave of plan.waves) {
+				for (const section of ["foundation", "integration"] as const) {
+					const tasks = wave[section];
+					if (tasks.length > 0) {
+						const v = validateDAG(tasks);
+						if (!v.valid) {
+							ctx.ui.notify(`DAG validation error in ${wave.name} ${section}: ${v.error}`, "error");
+							return;
+						}
+					}
+				}
+				for (const feature of wave.features) {
+					const v = validateDAG(feature.tasks);
+					if (!v.valid) {
+						ctx.ui.notify(`DAG validation error in ${wave.name} feature "${feature.name}": ${v.error}`, "error");
+						return;
+					}
+				}
+			}
+
+			// Find spec
+			const specRef = extractSpecRef(planContent);
+			let spec: string | null = null;
+			if (specRef) spec = findSpecFile(ctx.cwd, specRef);
+			if (!spec) spec = findSpecFile(ctx.cwd, projectName);
+			const specContent = spec ? fs.readFileSync(spec, "utf-8") : "";
+
+			// Count what's left
+			const allTaskIds = plan.waves.slice(resumeWave).flatMap((w) => [
+				...w.foundation,
+				...w.features.flatMap((f) => f.tasks),
+				...w.integration,
+			]);
+			const remaining = allTaskIds.filter((t) => !skipSet.has(t.id)).length;
+			const skipping = allTaskIds.filter((t) => skipSet.has(t.id)).length;
+
+			const preview = `**Resuming: ${plan.goal || "Implementation"}**\n` +
+				`Starting from wave ${resumeWave + 1} (${plan.waves[resumeWave].name})\n` +
+				`↩ Skipping ${skipping} completed tasks, running ${remaining} remaining\n` +
+				`Failed/skipped tasks from previous run will be re-executed.`;
+
+			const ok = await ctx.ui.confirm("Resume wave execution?", preview);
+			if (!ok) {
+				ctx.ui.notify("Resume cancelled.", "info");
+				return;
+			}
+
+			const controller = new AbortController();
+			const waveResults: import("./types.js").WaveResult[] = [];
+			let allPassed = true;
+			let totalCompleted = 0;
+
+			const logPath = logFilePath(ctx.cwd, projectName);
+			const relPlanFile = path.relative(ctx.cwd, planFile);
+			const relSpecFile = spec ? path.relative(ctx.cwd, spec) : "(none)";
+			const logLines: string[] = [
+				`# Execution Log (resumed)`,
+				``,
+				`Resumed: ${new Date().toISOString()}`,
+				`Previous run: ${prevState.startedAt}`,
+				`Resuming from wave: ${resumeWave + 1}`,
+				`Skipping ${skipping} completed tasks`,
+				`Spec: ${relSpecFile}`,
+				`Plan: ${relPlanFile}`,
+				``,
+			];
+			const writeLog = () => fs.writeFileSync(logPath, logLines.join("\n"), "utf-8");
+
+			const protectedPaths = [planFile, ...(spec ? [spec] : [])];
+
+			// Reuse the previous state (with completed task tracking)
+			const execState = prevState;
+
+			// Resume from the wave that was in progress
+			const totalTasks = plan.waves.reduce(
+				(s, w) => s + w.foundation.length + w.features.reduce((fs2, f) => fs2 + f.tasks.length, 0) + w.integration.length,
+				0,
+			);
+
+			for (let wi = resumeWave; wi < plan.waves.length; wi++) {
+				const wave = plan.waves[wi];
+				const waveLabel = `Wave ${wi + 1}/${plan.waves.length}: ${wave.name}`;
+				const waveTasks = [
+					...wave.foundation,
+					...wave.features.flatMap((f) => f.tasks),
+					...wave.integration,
+				];
+
+				advanceToWave(execState, wi);
+
+				ctx.ui.setStatus("waves", ctx.ui.theme.fg("accent", `⚡ ${waveLabel} (resumed)`));
+				logLines.push(`## ${waveLabel}`, "");
+
+				let completed = 0;
+				const taskStatuses = new Map<string, "pending" | "running" | "done" | "failed" | "skipped">();
+				for (const t of waveTasks) {
+					taskStatuses.set(t.id, skipSet.has(t.id) ? "done" : "pending");
+				}
+				const taskStartTimes = new Map<string, number>();
+				const taskFixCycles = new Set<string>();
+				const taskStallRetries = new Set<string>();
+				let currentPhase: string | null = null;
+				const mergeResults: import("./types.js").MergeResult[] = [];
+
+				const updateWidget = () => {
+					ctx.ui.setWidget("wave-progress", (_tui, theme) => {
+						const container = new Container();
+						container.addChild(new Text(theme.fg("accent", `⚡ ${waveLabel} (resumed) — ${completed}/${waveTasks.length} done`), 1, 0));
+
+						if (wave.foundation.length > 0) {
+							container.addChild(new Text(theme.fg("dim", "  Foundation:"), 1, 0));
+							for (const t of wave.foundation) {
+								container.addChild(new Text(`    ${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles, taskStallRetries)}`, 1, 0));
+							}
+						}
+						for (const feature of wave.features) {
+							if (feature.name !== "default") {
+								container.addChild(new Text(theme.fg("dim", `  Feature: ${feature.name}`), 1, 0));
+							}
+							for (const t of feature.tasks) {
+								const indent = feature.name !== "default" ? "    " : "  ";
+								container.addChild(new Text(`${indent}${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles, taskStallRetries)}`, 1, 0));
+							}
+						}
+						if (currentPhase === "merge" && mergeResults.length === 0) {
+							container.addChild(new Text(theme.fg("dim", "  Merge:"), 1, 0));
+							container.addChild(new Text(`    ${theme.fg("warning", "⏳")} Merging feature branches...`, 1, 0));
+						} else if (mergeResults.length > 0) {
+							container.addChild(new Text(theme.fg("dim", "  Merge:"), 1, 0));
+							for (const mr of mergeResults) {
+								const icon = mr.success ? (mr.hadChanges ? theme.fg("success", "✓") : theme.fg("muted", "⏭")) : theme.fg("error", "✗");
+								container.addChild(new Text(`    ${icon} ${mr.source} → ${mr.target}`, 1, 0));
+							}
+						}
+						if (wave.integration.length > 0) {
+							container.addChild(new Text(theme.fg("dim", "  Integration:"), 1, 0));
+							for (const t of wave.integration) {
+								container.addChild(new Text(`    ${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles, taskStallRetries)}`, 1, 0));
+							}
+						}
+						const overallDone = totalCompleted + completed;
+						container.addChild(new Text("", 0, 0));
+						container.addChild(new Text(theme.fg("dim", `Overall: ${overallDone}/${totalTasks} tasks`), 1, 0));
+						return container;
+					});
+				};
+
+				updateWidget();
+				const refreshTimer = setInterval(updateWidget, 2000);
+
+				const currentSkipSet = completedTaskIds(execState);
+
+				const waveResult = await executeWave({
+					wave,
+					waveNum: wi + 1,
+					specContent,
+					protectedPaths,
+					cwd: ctx.cwd,
+					maxConcurrency: MAX_CONCURRENCY,
+					signal: controller.signal,
+					skipTaskIds: currentSkipSet,
+					skipFoundationCommit: execState.foundationCommitted,
+					skipFeatureMerge: execState.featuresMerged,
+					onProgress: (update) => {
+						currentPhase = update.phase;
+						updateWidget();
+					},
+					onTaskStart: (phase, task) => {
+						taskStatuses.set(task.id, "running");
+						taskStartTimes.set(task.id, Date.now());
+						updateWidget();
+					},
+					onTaskEnd: (phase, task, result) => {
+						taskStatuses.set(task.id,
+							result.timedOut ? "timeout" :
+							result.exitCode === 0 ? "done" :
+							result.exitCode === -1 ? "skipped" : "failed"
+						);
+						taskFixCycles.delete(task.id);
+						completed++;
+						if (result.exitCode === 0) markTaskDone(execState, task.id);
+						else if (result.exitCode === -1) markTaskSkipped(execState, task.id);
+						else markTaskFailed(execState, task.id);
+						writeState(planFile!, execState);
+						updateWidget();
+					},
+					onFixCycleStart: (phase, task) => {
+						taskFixCycles.add(task.id);
+						updateWidget();
+					},
+					onStallRetry: (phase, task, reason) => {
+						taskStallRetries.add(task.id);
+						taskStartTimes.set(task.id, Date.now());
+						updateWidget();
+					},
+					onMergeResult: (result) => {
+						mergeResults.push(result);
+						updateWidget();
+					},
+					onLog: (line) => logLines.push(line),
+				});
+
+				clearInterval(refreshTimer);
+				totalCompleted += completed;
+				waveResults.push(waveResult);
+
+				if (!waveResult.passed) {
+					allPassed = false;
+					const failedTasks = [
+						...waveResult.foundationResults,
+						...waveResult.featureResults.flatMap((f) => f.taskResults),
+						...waveResult.integrationResults,
+					].filter((r) => r.exitCode !== 0 && r.exitCode !== -1);
+					if (failedTasks.length > 0) {
+						pi.sendMessage(
+							{ customType: "wave-task-failures", content: `❌ **${wave.name}** failed:\n${failedTasks.map((t) => `  - ${t.id}: ${t.title}`).join("\n")}`, display: true },
+							{ triggerTurn: false },
+						);
+					}
+					break; // Stop at first failed wave
+				} else {
+					pi.sendMessage(
+						{ customType: "wave-pass", content: `✅ **${wave.name}** passed`, display: true },
+						{ triggerTurn: false },
+					);
+				}
+
+				writeLog();
+			}
+
+			ctx.ui.setWidget("wave-progress", undefined);
+			logLines.push("---", "", `Finished: ${new Date().toISOString()}`);
+			logLines.push(`Result: ${allPassed ? "SUCCESS" : "STILL HAS ISSUES"}`);
+			writeLog();
+
+			if (allPassed) deleteState(planFile);
+
+			const icon = allPassed ? "✅" : "⚠️";
+			const verb = allPassed ? "Resume Complete" : "Resume Stopped";
+			let finalSummary = `# ${icon} ${verb}\n\n`;
+			finalSummary += `**Goal:** ${plan.goal}\n`;
+			finalSummary += `**Tasks:** ${totalCompleted}/${totalTasks}\n\n`;
+			for (const wr of waveResults) {
+				const wIcon = wr.passed ? "✅" : "❌";
+				finalSummary += `${wIcon} **${wr.wave}**\n`;
+			}
+			if (!allPassed) {
+				finalSummary += `\nRun \`/waves-continue ${args.trim()}\` again after fixing issues.`;
+			}
+			finalSummary += `\n📄 Log: \`${path.relative(ctx.cwd, logPath)}\``;
+
+			pi.sendMessage(
+				{ customType: "wave-complete", content: finalSummary, display: true },
+				{ triggerTurn: false },
+			);
+
+			ctx.ui.setStatus("waves", allPassed
+				? ctx.ui.theme.fg("success", `✅ Resume done — ${totalCompleted} tasks`)
+				: ctx.ui.theme.fg("warning", `⚠️ Resume stopped — fix and /waves-continue`),
 			);
 			setTimeout(() => ctx.ui.setStatus("waves", undefined), 15000);
 		},

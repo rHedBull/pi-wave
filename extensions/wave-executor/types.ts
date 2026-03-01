@@ -111,6 +111,25 @@ export interface FileAccessRules {
 	safeBashOnly?: boolean;
 }
 
+// ── Execution State (for resume) ───────────────────────────────────
+
+export interface ExecutionState {
+	/** Relative path to the plan file */
+	planFile: string;
+	/** When execution first started */
+	startedAt: string;
+	/** When state was last updated */
+	updatedAt: string;
+	/** 0-indexed wave currently in progress (or last attempted) */
+	currentWave: number;
+	/** Per-task completion status. Only "done" tasks are skipped on resume. */
+	taskStates: Record<string, "done" | "failed" | "skipped">;
+	/** Whether foundation was committed to git in the current wave */
+	foundationCommitted: boolean;
+	/** Whether feature branches were merged in the current wave */
+	featuresMerged: boolean;
+}
+
 // ── Progress ───────────────────────────────────────────────────────
 
 export interface ProgressUpdate {

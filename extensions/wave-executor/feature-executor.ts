@@ -40,6 +40,8 @@ export interface FeatureExecutorOptions {
 	cwd: string; // fallback cwd if no worktree
 	maxConcurrency: number;
 	signal?: AbortSignal;
+	/** Task IDs to skip (already completed in a previous run). */
+	skipTaskIds?: Set<string>;
 	onTaskStart?: (task: Task) => void;
 	onTaskEnd?: (task: Task, result: TaskResult) => void;
 	onFixCycleStart?: (task: Task) => void;
@@ -58,6 +60,7 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 		cwd,
 		maxConcurrency,
 		signal,
+		skipTaskIds = new Set(),
 		onTaskStart,
 		onTaskEnd,
 		onFixCycleStart,
@@ -121,6 +124,22 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 			runnableTasks,
 			actuallyParallel ? maxConcurrency : 1,
 			async (task) => {
+				// Skip tasks already completed in a previous run
+				if (skipTaskIds.has(task.id)) {
+					const skipped: TaskResult = {
+						id: task.id,
+						title: task.title,
+						agent: task.agent,
+						exitCode: 0,
+						output: "↩ Resumed — already completed in previous run",
+						stderr: "",
+						durationMs: 0,
+					};
+					onTaskStart?.(task);
+					onTaskEnd?.(task, skipped);
+					return skipped;
+				}
+
 				onTaskStart?.(task);
 				const start = Date.now();
 

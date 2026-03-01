@@ -45,6 +45,12 @@ export interface WaveExecutorOptions {
 	cwd: string;
 	maxConcurrency: number;
 	signal?: AbortSignal;
+	/** Task IDs to skip (already completed in a previous run). */
+	skipTaskIds?: Set<string>;
+	/** Whether foundation was already committed in a previous run of this wave. */
+	skipFoundationCommit?: boolean;
+	/** Whether features were already merged in a previous run of this wave. */
+	skipFeatureMerge?: boolean;
 	onProgress?: (update: ProgressUpdate) => void;
 	onTaskStart?: (phase: string, task: Task) => void;
 	onTaskEnd?: (phase: string, task: Task, result: TaskResult) => void;
@@ -65,6 +71,9 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 		cwd,
 		maxConcurrency,
 		signal,
+		skipTaskIds = new Set(),
+		skipFoundationCommit = false,
+		skipFeatureMerge = false,
 		onProgress,
 		onTaskStart,
 		onTaskEnd,
@@ -90,6 +99,32 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 	const allFeatureWorktrees: FeatureWorktree[] = [];
 
 	try {
+		// ── Skip helper: wraps a task runner to short-circuit completed tasks ──
+
+		const wrapWithSkip = (
+			phase: string,
+			actualRun: (task: Task) => Promise<TaskResult>,
+		) => {
+			return async (task: Task): Promise<TaskResult> => {
+				if (skipTaskIds.has(task.id)) {
+					const skipped: TaskResult = {
+						id: task.id,
+						title: task.title,
+						agent: task.agent,
+						exitCode: 0,
+						output: "↩ Resumed — already completed in previous run",
+						stderr: "",
+						durationMs: 0,
+					};
+					onTaskStart?.(phase, task);
+					onTaskEnd?.(phase, task, skipped);
+					logTaskResult(onLog, task, skipped);
+					return skipped;
+				}
+				return actualRun(task);
+			};
+		};
+
 		// ── 1. Foundation Phase ─────────────────────────────────────
 
 		if (wave.foundation.length > 0) {
@@ -98,7 +133,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 
 			const fResults = await executeDAG(
 				wave.foundation,
-				async (task) => {
+				wrapWithSkip("foundation", async (task) => {
 					onTaskStart?.("foundation", task);
 					const start = Date.now();
 					const result = await runTaskOnBase(task, cwd, specContent, protectedPaths, signal,
@@ -107,7 +142,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 					onTaskEnd?.("foundation", task, taskResult);
 					logTaskResult(onLog, task, taskResult);
 					return taskResult;
-				},
+				}),
 				maxConcurrency,
 			);
 			foundationResults.push(...fResults);
@@ -124,8 +159,8 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 				};
 			}
 
-			// Commit foundation to base branch
-			if (useGit && repoRoot) {
+			// Commit foundation to base branch (skip if already committed in previous run)
+			if (useGit && repoRoot && !skipFoundationCommit) {
 				try {
 					if (hasUncommittedChanges(repoRoot)) {
 						const { execSync } = await import("node:child_process");
@@ -194,6 +229,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 						cwd,
 						maxConcurrency: perFeatureConcurrency,
 						signal,
+						skipTaskIds,
 						onTaskStart: (task) => onTaskStart?.(`feature:${feature.name}`, task),
 						onTaskEnd: (task, tr) => {
 							onTaskEnd?.(`feature:${feature.name}`, task, tr);
@@ -268,7 +304,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 
 			const iResults = await executeDAG(
 				wave.integration,
-				async (task) => {
+				wrapWithSkip("integration", async (task) => {
 					onTaskStart?.("integration", task);
 					const start = Date.now();
 					const result = await runTaskOnBase(task, cwd, specContent, protectedPaths, signal,
@@ -295,7 +331,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 					onTaskEnd?.("integration", task, taskResult);
 					logTaskResult(onLog, task, taskResult);
 					return taskResult;
-				},
+				}),
 				maxConcurrency,
 			);
 			integrationResults.push(...iResults);
