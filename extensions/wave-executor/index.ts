@@ -16,7 +16,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Container, Text } from "@mariozechner/pi-tui";
-import { validateDAG } from "./dag.js";
+import { validateDAG, validatePlan } from "./dag.js";
 import {
 	advanceToWave,
 	completedTaskIds,
@@ -377,7 +377,22 @@ Files: list of files this feature owns
 - Target: 2-5 waves, 2-6 features per wave, 2-6 tasks per feature
 - All agents use \`permissionMode: fullAuto\`
 
-After writing, tell the user: "Next step: \`/waves-execute ${projectName}\`"`;
+**After writing the plan, you MUST validate it before telling the user it's ready:**
+
+1. Read the plan file back
+2. For each wave, collect all task IDs per section:
+   - Foundation task IDs (from \`### Foundation\`)
+   - Each feature's task IDs (from \`### Feature: <name>\`)
+   - Integration task IDs (from \`### Integration\`)
+3. For every \`Depends:\` line, verify EACH dependency ID exists in the **same section**:
+   - Foundation tasks can only depend on other foundation tasks
+   - Feature tasks can only depend on tasks in the **same** feature
+   - Integration tasks can only depend on other integration tasks
+   - Cross-section dependencies are INVALID (e.g., integration depending on \`w1-skill-t3\`)
+4. Verify no two parallel features write to the same file
+5. If ANY violations are found, fix them (remove invalid cross-section deps, move files to foundation) and rewrite the plan
+
+Only after validation passes, tell the user: "Next step: \`/waves-execute ${projectName}\`"`;
 	}
 
 	pi.registerCommand("waves-plan", {
@@ -564,25 +579,12 @@ Do NOT write any files. Just output the outline as your response.`;
 			// Spec is optional — execution can proceed with empty spec context
 			const specContent = spec ? fs.readFileSync(spec, "utf-8") : "";
 
-			// Validate all DAGs
-			for (const wave of plan.waves) {
-				for (const section of ["foundation", "integration"] as const) {
-					const tasks = wave[section];
-					if (tasks.length > 0) {
-						const v = validateDAG(tasks);
-						if (!v.valid) {
-							ctx.ui.notify(`DAG validation error in ${wave.name} ${section}: ${v.error}`, "error");
-							return;
-						}
-					}
-				}
-				for (const feature of wave.features) {
-					const v = validateDAG(feature.tasks);
-					if (!v.valid) {
-						ctx.ui.notify(`DAG validation error in ${wave.name} feature "${feature.name}": ${v.error}`, "error");
-						return;
-					}
-				}
+			// Validate all DAGs (per-section + cross-section + file overlap)
+			const planValidation = validatePlan(plan);
+			if (!planValidation.valid) {
+				const errorList = planValidation.errors.map((e) => `  • ${e}`).join("\n");
+				ctx.ui.notify(`Plan has DAG errors:\n${errorList}\n\nFix the plan and re-run /waves-execute.`, "error");
+				return;
 			}
 
 			// Count tasks
@@ -1002,25 +1004,12 @@ Do NOT write any files. Just output the outline as your response.`;
 				return;
 			}
 
-			// Validate DAGs (same as /waves-execute)
-			for (const wave of plan.waves) {
-				for (const section of ["foundation", "integration"] as const) {
-					const tasks = wave[section];
-					if (tasks.length > 0) {
-						const v = validateDAG(tasks);
-						if (!v.valid) {
-							ctx.ui.notify(`DAG validation error in ${wave.name} ${section}: ${v.error}`, "error");
-							return;
-						}
-					}
-				}
-				for (const feature of wave.features) {
-					const v = validateDAG(feature.tasks);
-					if (!v.valid) {
-						ctx.ui.notify(`DAG validation error in ${wave.name} feature "${feature.name}": ${v.error}`, "error");
-						return;
-					}
-				}
+			// Validate all DAGs (per-section + cross-section + file overlap)
+			const planValidation = validatePlan(plan);
+			if (!planValidation.valid) {
+				const errorList = planValidation.errors.map((e) => `  • ${e}`).join("\n");
+				ctx.ui.notify(`Plan has DAG errors:\n${errorList}\n\nFix the plan and re-run /waves-continue.`, "error");
+				return;
 			}
 
 			// Find spec

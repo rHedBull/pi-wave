@@ -20,7 +20,10 @@ import type { Feature, Plan, Task, Wave } from "./types.js";
 
 export function parsePlanV2(markdown: string): Plan {
 	const lines = markdown.split("\n");
-	const plan: Plan = { goal: "", waves: [] };
+	const plan: Plan = { goal: "", dataSchemas: "", waves: [] };
+
+	// Extract ## Data Schemas section (everything between ## Data Schemas and the next ## heading)
+	plan.dataSchemas = extractDataSchemas(markdown);
 
 	// Detect format: if any line starts with "### Feature:" or "### Foundation" or "### Integration", it's the new format
 	const hasFeatureHeaders = lines.some(
@@ -286,7 +289,10 @@ export function parsePlanV2(markdown: string): Plan {
 
 export function parsePlanLegacy(markdown: string): Plan {
 	const lines = markdown.split("\n");
-	const plan: Plan = { goal: "", waves: [] };
+	const plan: Plan = { goal: "", dataSchemas: "", waves: [] };
+
+	// Extract ## Data Schemas section if present
+	plan.dataSchemas = extractDataSchemas(markdown);
 
 	let currentWave: Wave | null = null;
 	let currentTask: Task | null = null;
@@ -462,4 +468,41 @@ export function parsePlanLegacy(markdown: string): Plan {
 	}
 
 	return plan;
+}
+
+// ── Data Schemas Extraction ────────────────────────────────────────
+
+/**
+ * Extract the ## Data Schemas section from a plan's Markdown.
+ *
+ * Returns the full content between `## Data Schemas` and the next `## ` heading
+ * (or `---` separator followed by a wave heading). Returns empty string if not found.
+ */
+export function extractDataSchemas(markdown: string): string {
+	const lines = markdown.split("\n");
+	let capturing = false;
+	const captured: string[] = [];
+
+	for (const line of lines) {
+		// Start capturing at ## Data Schemas
+		if (/^## Data Schemas/i.test(line.trim())) {
+			capturing = true;
+			captured.push(line);
+			continue;
+		}
+
+		if (capturing) {
+			// Stop at the next ## heading (but not ### subsections within Data Schemas)
+			if (/^## (?!#)/.test(line) && !/^## Data Schemas/i.test(line)) {
+				break;
+			}
+			// Also stop at --- separator (typically before Wave sections)
+			if (line.trim() === "---") {
+				break;
+			}
+			captured.push(line);
+		}
+	}
+
+	return captured.join("\n").trim();
 }

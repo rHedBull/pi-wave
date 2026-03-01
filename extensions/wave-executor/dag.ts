@@ -5,7 +5,7 @@
  * sorted levels, and executes tasks level-by-level with parallelism within levels.
  */
 
-import type { DAGLevel, Task, TaskResult } from "./types.js";
+import type { DAGLevel, Plan, Task, TaskResult } from "./types.js";
 
 // ── Validation ─────────────────────────────────────────────────────
 
@@ -80,6 +80,115 @@ export function validateDAG(tasks: Task[]): { valid: boolean; error?: string } {
 	}
 
 	return { valid: true };
+}
+
+// ── Plan-Level Validation ──────────────────────────────────────────
+
+/**
+ * Validate an entire plan's DAG structure:
+ * - Per-section DAG validation (cycles, missing refs within scope)
+ * - Cross-section dependency detection (foundation/feature/integration are separate scopes)
+ * - Duplicate task ID detection across the entire plan
+ * - Feature file overlap detection (parallel features must not write to same files)
+ *
+ * Returns all errors found (not just the first one).
+ */
+export function validatePlan(plan: Plan): { valid: boolean; errors: string[] } {
+	const errors: string[] = [];
+
+	for (const wave of plan.waves) {
+		const waveLabel = `Wave "${wave.name}"`;
+
+		// Collect all task IDs in the wave, grouped by section
+		const sectionTasks = new Map<string, Set<string>>();
+
+		// Foundation
+		const foundationIds = new Set(wave.foundation.map((t) => t.id));
+		sectionTasks.set("foundation", foundationIds);
+
+		// Features
+		for (const feature of wave.features) {
+			const featureIds = new Set(feature.tasks.map((t) => t.id));
+			sectionTasks.set(`feature:${feature.name}`, featureIds);
+		}
+
+		// Integration
+		const integrationIds = new Set(wave.integration.map((t) => t.id));
+		sectionTasks.set("integration", integrationIds);
+
+		// All task IDs in this wave (for cross-section detection)
+		const allWaveIds = new Map<string, string>(); // task ID → section label
+		for (const [section, ids] of sectionTasks) {
+			for (const id of ids) {
+				if (allWaveIds.has(id)) {
+					errors.push(
+						`${waveLabel}: Duplicate task ID "${id}" — found in both ${allWaveIds.get(id)} and ${section}`,
+					);
+				}
+				allWaveIds.set(id, section);
+			}
+		}
+
+		// Per-section DAG validation + cross-section dependency check
+		const validateSection = (tasks: Task[], sectionLabel: string, sectionIds: Set<string>) => {
+			// Standard DAG validation (cycles + missing refs within scope)
+			if (tasks.length > 0) {
+				const v = validateDAG(tasks);
+				if (!v.valid) {
+					errors.push(`${waveLabel} ${sectionLabel}: ${v.error}`);
+				}
+			}
+
+			// Cross-section dependency check
+			for (const task of tasks) {
+				for (const dep of task.depends) {
+					if (!sectionIds.has(dep) && allWaveIds.has(dep)) {
+						const depSection = allWaveIds.get(dep)!;
+						errors.push(
+							`${waveLabel} ${sectionLabel}: Task "${task.id}" depends on "${dep}" which is in ${depSection}. ` +
+							`Dependencies must be within the same section — the executor handles cross-section ordering automatically.`,
+						);
+					}
+				}
+			}
+		};
+
+		validateSection(wave.foundation, "foundation", foundationIds);
+		for (const feature of wave.features) {
+			const featureIds = sectionTasks.get(`feature:${feature.name}`)!;
+			validateSection(feature.tasks, `feature "${feature.name}"`, featureIds);
+		}
+		validateSection(wave.integration, "integration", integrationIds);
+
+		// Feature file overlap detection
+		const fileOwnership = new Map<string, string[]>(); // file → [feature names]
+		for (const feature of wave.features) {
+			const featureFiles = new Set<string>();
+			for (const task of feature.tasks) {
+				for (const file of task.files) {
+					featureFiles.add(file);
+				}
+			}
+			// Also include feature-level files
+			for (const file of feature.files) {
+				featureFiles.add(file);
+			}
+			for (const file of featureFiles) {
+				if (!fileOwnership.has(file)) fileOwnership.set(file, []);
+				fileOwnership.get(file)!.push(feature.name);
+			}
+		}
+		for (const [file, features] of fileOwnership) {
+			if (features.length > 1) {
+				errors.push(
+					`${waveLabel}: File "${file}" is written by multiple parallel features: ${features.join(", ")}. ` +
+					`Move shared files to Foundation or split into separate waves.`,
+				);
+			}
+		}
+	}
+
+	return { valid: errors.length === 0, errors };
 }
 
 // ── Build DAG Levels ───────────────────────────────────────────────

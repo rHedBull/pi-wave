@@ -88,16 +88,43 @@ Task IDs follow the pattern: `w{wave}-{feature}-t{num}`
 - `agent: worker` — writes implementation files (from spec + test references)
 - `agent: wave-verifier` — runs tests, type checks, validates integration
 
+## Data Schemas (CRITICAL)
+
+The plan MUST include a `## Data Schemas` section immediately after `## TDD Approach` and before the first wave. This section is the **single source of truth** for all shared data contracts. It is passed verbatim to every executing agent.
+
+### What goes in Data Schemas
+
+**Every** data definition that multiple tasks or features will reference:
+
+- **SQL DDL**: Complete `CREATE TABLE` statements with exact column names, types, constraints, and indexes. Not pseudocode — the actual SQL that will be in migration files.
+- **Shared types/interfaces**: Complete struct/interface/class definitions with exact field names and types. Not snippets — full definitions.
+- **API signatures**: Complete function/method signatures for shared interfaces (parameters, return types).
+- **Constants and enums**: Exact values, not descriptions.
+
+### Rules
+
+1. **Complete, not snippets.** Every column, every field, every parameter. No `...` or "similar to above."
+2. **One canonical name per concept.** If the SQL column is `captured_at`, the Rust field is `captured_at`, the JSON key is `captured_at`. Document the mapping explicitly if names must differ across layers (e.g., SQL `snake_case` vs JSON `camelCase`).
+3. **Copy from spec, then refine.** If the spec uses pseudocode field names, resolve them to actual implementation names here. The plan's Data Schemas supersedes the spec for naming.
+4. **Include cross-references.** If a Rust struct maps to a SQL table, say so: `// Maps to: scan_metadata table (001_scan_metadata.sql)`.
+
+### Why this exists
+
+Parallel agents cannot see each other's work. Without a shared schema section:
+- Migration agent writes `captured_at`, query agent writes `timestamp` → runtime failure
+- Test-writer assumes `bbox_min: Point3`, worker implements `bbox_min_x: f64` → compile failure
+- These mismatches are only caught at integration time, wasting entire waves
+
+The Data Schemas section is passed to every agent automatically. It's the contract they all code against.
+
 ## Code Hints in Task Descriptions
 
 Each task description MUST include small, targeted code snippets:
-- Type/interface definitions (exact signatures)
 - Function signatures with parameter types and return types
 - Key imports
 - Example test assertions (for test-writer tasks)
-- Specific naming conventions (field names, column names, etc.)
 
-**CRITICAL: Canonical Names** — Repeat exact field names, type names, function signatures, and conventions in EVERY task description. Parallel agents can't see each other's work, so every task must independently get the names right.
+**CRITICAL: Canonical Names** — Reference the Data Schemas section for exact field names, type names, and column names. Repeat critical names in task descriptions where helpful, but the Data Schemas section is authoritative. If a task description contradicts Data Schemas, Data Schemas wins.
 
 Keep snippets under 10-15 lines. Show the interface, not the implementation.
 
@@ -122,6 +149,38 @@ One sentence from the spec overview.
 
 ## TDD Approach
 Brief: framework, patterns, directory structure.
+
+## Data Schemas
+Single source of truth for all shared data contracts. Passed verbatim to every executing agent.
+
+### SQL Tables
+Complete DDL for every table. Exact column names, types, constraints.
+```sql
+CREATE TABLE users (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email       TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+### Shared Types
+Complete type definitions. Exact field names matching SQL columns.
+```typescript
+// Maps to: users table
+interface User {
+    id: string;       // UUID
+    email: string;
+    name: string;
+    createdAt: Date;  // SQL: created_at (camelCase in TS)
+}
+```
+
+### API Signatures
+```typescript
+function createUser(input: CreateUserInput): Promise<User>;
+function getUser(id: string): Promise<User | null>;
+```
 
 ---
 
