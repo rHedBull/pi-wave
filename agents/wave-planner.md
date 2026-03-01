@@ -67,7 +67,8 @@ Integration (sequential, on merged base)
 ### Foundation Rules
 - Define exact interfaces, types, field names, and function signatures IN THE PLAN
 - Foundation agents materialize contracts as code — they don't design
-- Always include a verifier task that confirms foundation compiles/imports
+- **Foundation tasks that produce source files MUST follow TDD**: test-writer → worker → wave-verifier, same as feature tasks. The test-writer creates a test that imports and exercises the output (constructs types, calls functions, round-trips serialization). The worker makes the test pass. The verifier confirms. This catches dead code (files created but never wired into the build) and broken contracts (missing feature flags, wrong types) at the source — not in downstream tasks.
+- Always include a final verifier task that confirms the full foundation compiles/imports together
 
 ### Integration Rules
 - Include a task that wires modules together (imports, app setup, routing)
@@ -189,19 +190,31 @@ Working state: <what "done" means — server starts, tests pass, feature X works
 
 ### Foundation
 Shared contracts and infrastructure. Committed before features branch.
+Each foundation task that produces source files follows TDD: test → implement → verify.
 
-#### Task w1-found-t1: <title>
+#### Task w1-found-t1: Write shared types tests
+- **Agent**: test-writer
+- **Files**: `tests/test_types.ts`
+- **Description**: Write tests that import all shared types, construct instances, and verify serialization round-trips.
+  ```typescript
+  import { User } from '../src/types';
+  test('User round-trips through JSON', () => { ... });
+  ```
+
+#### Task w1-found-t2: Create shared types
 - **Agent**: worker
-- **Files**: `path/to/types.ts`, `path/to/config.ts`
-- **Description**: Create shared types and interfaces.
+- **Files**: `path/to/types.ts`, `path/to/config.ts`, `path/to/index.ts`
+- **Depends**: w1-found-t1
+- **Tests**: `tests/test_types.ts`
+- **Description**: Create shared types, wire into module exports, make tests pass.
   ```typescript
   interface User { id: string; email: string; ... }
   ```
 
-#### Task w1-found-t2: Verify foundation
+#### Task w1-found-t3: Verify foundation
 - **Agent**: wave-verifier
-- **Depends**: w1-found-t1
-- **Description**: Verify imports work, types compile.
+- **Depends**: w1-found-t2
+- **Description**: Run full test suite, verify all source files compile and are reachable from the build entry point.
 
 ### Feature: auth
 Files: backend/auth.py, backend/routers/auth.py, backend/tests/test_auth.py
