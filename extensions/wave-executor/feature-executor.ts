@@ -16,6 +16,7 @@ import {
 } from "../subagent/git-worktree.js";
 import { buildDAG, mapConcurrent } from "./dag.js";
 import {
+	checkDeclaredFiles,
 	extractFinalOutput,
 	extractSpecSections,
 	runSubagent,
@@ -36,6 +37,8 @@ export interface FeatureExecutorOptions {
 	featureWorktree: FeatureWorktree | null; // null if no git
 	waveNum: number;
 	specContent: string;
+	/** Complete data schemas section from the plan — passed verbatim to every agent. */
+	dataSchemas: string;
 	protectedPaths: string[];
 	cwd: string; // fallback cwd if no worktree
 	maxConcurrency: number;
@@ -56,6 +59,7 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 		featureWorktree,
 		waveNum,
 		specContent,
+		dataSchemas,
 		protectedPaths,
 		cwd,
 		maxConcurrency,
@@ -150,13 +154,33 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 					if (sw) taskCwd = sw.dir;
 				}
 
-				const result = await runSingleTask(task, taskCwd, specContent, protectedPaths, signal, onStallRetry);
+				// Collect all files from the feature for verifier context
+				const featureFiles = task.agent === "wave-verifier"
+					? feature.tasks.filter(t => t.agent !== "wave-verifier").flatMap(t => t.files)
+					: undefined;
+
+				const result = await runSingleTask(task, taskCwd, specContent, dataSchemas, protectedPaths, signal, onStallRetry, featureFiles);
 				const elapsed = Date.now() - start;
 
 				let taskResult: TaskResult = {
 					...result,
 					durationMs: elapsed,
 				};
+
+				// Post-task file existence check for worker/test-writer tasks
+				if (result.exitCode === 0 && task.agent !== "wave-verifier" && task.files.length > 0) {
+					const missingFiles = checkDeclaredFiles(task.files, taskCwd);
+					if (missingFiles.length > 0) {
+						taskResult = {
+							...taskResult,
+							exitCode: 1,
+							output: taskResult.output +
+								`\n\n⚠️ POST-CHECK FAILED: Task declared these output files but they were not created:\n` +
+								missingFiles.map(f => `  - ${f}`).join("\n") +
+								`\n\nThe agent exited successfully but did not produce the expected files.`,
+						};
+					}
+				}
 
 				// Fix cycle for verifier failures (max 1 retry)
 				if (task.agent === "wave-verifier" && result.exitCode !== 0) {
@@ -167,6 +191,7 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 						feature,
 						taskCwd,
 						specContent,
+						dataSchemas,
 						protectedPaths,
 						signal,
 					);
@@ -214,17 +239,23 @@ async function runSingleTask(
 	task: Task,
 	cwd: string,
 	specContent: string,
+	dataSchemas: string,
 	protectedPaths: string[],
 	signal?: AbortSignal,
 	onStallRetry?: (task: Task, reason: string) => void,
+	/** All files from the feature (for verifier context) */
+	allFeatureFiles?: string[],
 ): Promise<Omit<TaskResult, "durationMs">> {
 	const agentName = task.agent || "worker";
 	const specContext = extractSpecSections(specContent, task.specRefs);
+	const schemasBlock = dataSchemas
+		? `\n## Data Schemas (authoritative — use these exact names)\n${dataSchemas}\n`
+		: "";
 	let agentTask: string;
 
 	if (agentName === "test-writer") {
 		agentTask = `You are writing tests as part of a TDD implementation plan.
-
+${schemasBlock}
 ## Spec Reference
 ${specContext}
 
@@ -241,10 +272,14 @@ IMPORTANT:
 - Tests define the expected behavior — they are the contract
 - Follow existing test patterns in the project
 - Do not touch implementation files
+- Use exact field names, column names, and type names from the Data Schemas section above
 - You may be working in a git worktree. Use relative paths.`;
 	} else if (agentName === "wave-verifier") {
+		const featureFilesBlock = allFeatureFiles && allFeatureFiles.length > 0
+			? `\n## Required Files (MUST ALL EXIST)\nThese files should have been created by prior tasks. Verify EVERY one exists before running tests:\n${allFeatureFiles.map(f => `- \`${f}\``).join("\n")}\n`
+			: "";
 		agentTask = `You are verifying completed work.
-
+${schemasBlock}
 ## Spec Reference
 ${specContext}
 
@@ -252,12 +287,14 @@ ${specContext}
 **${task.id}: ${task.title}**
 ${task.files.length > 0 ? `Files to check: ${task.files.join(", ")}` : ""}
 ${task.specRefs.length > 0 ? `Spec refs: ${task.specRefs.join(", ")}` : ""}
-
+${featureFilesBlock}
 ${task.description}
 
-IMPORTANT:
-- Run the test suite and report results
-- Check for type errors, lint issues
+IMPORTANT — verify in this order:
+1. **File existence** — check that ALL required files listed above actually exist on disk. If ANY are missing, immediately report status "fail" with the list of missing files. Do NOT proceed to tests.
+2. **Syntax/compilation** — run the compiler/linter (e.g., \`cargo build\`, \`npx tsc --noEmit\`). If it fails, report "fail".
+3. **Tests** — run the test suite. If tests fail, report "fail".
+4. **Completeness** — verify the implementation matches the task descriptions (correct types, methods, signatures).
 - Do NOT modify any files — only read and run checks
 - If working in a git worktree, run tests relative to the worktree root`;
 	} else {
@@ -266,7 +303,7 @@ IMPORTANT:
 				? `\nTests to satisfy: ${task.testFiles.join(", ")}\nYour implementation MUST make these tests pass.`
 				: "";
 		agentTask = `You are implementing code as part of a TDD plan. Tests may have already been written — your job is to make them pass.
-
+${schemasBlock}
 ## Spec Reference
 ${specContext}
 
@@ -282,6 +319,7 @@ IMPORTANT:
 - Do NOT modify test files
 - Your code must make the existing tests pass
 - Follow the spec requirements exactly
+- Use exact field names, column names, and type names from the Data Schemas section above — they are authoritative and override any names in the spec
 - Do not touch files outside your task scope
 - You may be working in a git worktree. Use relative paths.`;
 	}
@@ -353,14 +391,18 @@ async function runFixCycle(
 	feature: Feature,
 	cwd: string,
 	specContent: string,
+	dataSchemas: string,
 	protectedPaths: string[],
 	signal?: AbortSignal,
 ): Promise<Omit<TaskResult, "durationMs"> | null> {
 	// Gather all writable files in this feature for the fix agent
 	const featureFiles = feature.tasks.flatMap((t) => t.files);
+	const schemasBlock = dataSchemas
+		? `\n## Data Schemas (authoritative — use these exact names)\n${dataSchemas}\n`
+		: "";
 
 	const fixTask = `Fix the issues found during verification:
-
+${schemasBlock}
 ## Verification Output
 ${verifierResult.output}
 
@@ -370,15 +412,16 @@ ${extractSpecSections(specContent, verifierTask.specRefs)}
 ## Files You Can Modify
 ${featureFiles.join(", ")}
 
-Fix the issues and ensure all tests pass. You may be working in a git worktree — use relative paths.`;
+Fix the issues and ensure all tests pass. Use exact names from Data Schemas above. You may be working in a git worktree — use relative paths.`;
 
 	await runSubagent("worker", fixTask, cwd, signal, {
 		allowWrite: featureFiles,
 		protectedPaths,
 	});
 
-	// Re-run verifier
-	const reResult = await runSingleTask(verifierTask, cwd, specContent, protectedPaths, signal);
+	// Re-run verifier (with feature files context)
+	const allFeatureFiles = feature.tasks.filter(t => t.agent !== "wave-verifier").flatMap(t => t.files);
+	const reResult = await runSingleTask(verifierTask, cwd, specContent, dataSchemas, protectedPaths, signal, undefined, allFeatureFiles);
 
 	// Check if re-verification passed
 	let passed = reResult.exitCode === 0;

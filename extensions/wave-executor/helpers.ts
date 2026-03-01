@@ -11,6 +11,27 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { FileAccessRules } from "./types.js";
 
+// ── Post-Task File Verification ────────────────────────────────────
+
+/**
+ * Check that files declared by a task actually exist on disk.
+ * Returns the list of missing files. Empty array = all present.
+ *
+ * Skips glob patterns (containing *) since those can't be checked simply.
+ */
+export function checkDeclaredFiles(declaredFiles: string[], cwd: string): string[] {
+	const missing: string[] = [];
+	for (const file of declaredFiles) {
+		// Skip glob patterns
+		if (file.includes("*")) continue;
+		const resolved = path.resolve(cwd, file);
+		if (!fs.existsSync(resolved)) {
+			missing.push(file);
+		}
+	}
+	return missing;
+}
+
 // ── Spec Helpers ───────────────────────────────────────────────────
 
 /**

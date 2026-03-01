@@ -20,6 +20,7 @@ import {
 import { executeDAG, mapConcurrent } from "./dag.js";
 import { executeFeature } from "./feature-executor.js";
 import {
+	checkDeclaredFiles,
 	extractFinalOutput,
 	extractSpecSections,
 	runSubagent,
@@ -41,6 +42,8 @@ export interface WaveExecutorOptions {
 	wave: Wave;
 	waveNum: number;
 	specContent: string;
+	/** Complete data schemas section from the plan — passed verbatim to every agent. */
+	dataSchemas: string;
 	protectedPaths: string[];
 	cwd: string;
 	maxConcurrency: number;
@@ -67,6 +70,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 		wave,
 		waveNum,
 		specContent,
+		dataSchemas,
 		protectedPaths,
 		cwd,
 		maxConcurrency,
@@ -136,9 +140,30 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 				wrapWithSkip("foundation", async (task) => {
 					onTaskStart?.("foundation", task);
 					const start = Date.now();
-					const result = await runTaskOnBase(task, cwd, specContent, protectedPaths, signal,
-						(t, reason) => onStallRetry?.("foundation", t, reason));
-					const taskResult: TaskResult = { ...result, durationMs: Date.now() - start };
+					// Collect all foundation files for verifier context
+					const foundationFiles = task.agent === "wave-verifier"
+						? wave.foundation.filter(t => t.agent !== "wave-verifier").flatMap(t => t.files)
+						: undefined;
+
+					const result = await runTaskOnBase(task, cwd, specContent, dataSchemas, protectedPaths, signal,
+						(t, reason) => onStallRetry?.("foundation", t, reason), foundationFiles);
+					let taskResult: TaskResult = { ...result, durationMs: Date.now() - start };
+
+					// Post-task file existence check for worker/test-writer tasks
+					if (result.exitCode === 0 && task.agent !== "wave-verifier" && task.files.length > 0) {
+						const missingFiles = checkDeclaredFiles(task.files, cwd);
+						if (missingFiles.length > 0) {
+							taskResult = {
+								...taskResult,
+								exitCode: 1,
+								output: taskResult.output +
+									`\n\n⚠️ POST-CHECK FAILED: Task declared these output files but they were not created:\n` +
+									missingFiles.map(f => `  - ${f}`).join("\n") +
+									`\n\nThe agent exited successfully but did not produce the expected files.`,
+							};
+						}
+					}
+
 					onTaskEnd?.("foundation", task, taskResult);
 					logTaskResult(onLog, task, taskResult);
 					return taskResult;
@@ -225,6 +250,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 						featureWorktree,
 						waveNum,
 						specContent,
+						dataSchemas,
 						protectedPaths,
 						cwd,
 						maxConcurrency: perFeatureConcurrency,
@@ -307,9 +333,33 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 				wrapWithSkip("integration", async (task) => {
 					onTaskStart?.("integration", task);
 					const start = Date.now();
-					const result = await runTaskOnBase(task, cwd, specContent, protectedPaths, signal,
-						(t, reason) => onStallRetry?.("integration", t, reason));
+					// Collect ALL wave files for integration verifier context
+					const allWaveFiles = task.agent === "wave-verifier"
+						? [
+							...wave.foundation.filter(t => t.agent !== "wave-verifier").flatMap(t => t.files),
+							...wave.features.flatMap(f => f.tasks.filter(t => t.agent !== "wave-verifier").flatMap(t => t.files)),
+							...wave.integration.filter(t => t.agent !== "wave-verifier" && t.id !== task.id).flatMap(t => t.files),
+						]
+						: undefined;
+
+					const result = await runTaskOnBase(task, cwd, specContent, dataSchemas, protectedPaths, signal,
+						(t, reason) => onStallRetry?.("integration", t, reason), allWaveFiles);
 					let taskResult: TaskResult = { ...result, durationMs: Date.now() - start };
+
+					// Post-task file existence check for worker/test-writer tasks
+					if (result.exitCode === 0 && task.agent !== "wave-verifier" && task.files.length > 0) {
+						const missingFiles = checkDeclaredFiles(task.files, cwd);
+						if (missingFiles.length > 0) {
+							taskResult = {
+								...taskResult,
+								exitCode: 1,
+								output: taskResult.output +
+									`\n\n⚠️ POST-CHECK FAILED: Task declared these output files but they were not created:\n` +
+									missingFiles.map(f => `  - ${f}`).join("\n") +
+									`\n\nThe agent exited successfully but did not produce the expected files.`,
+							};
+						}
+					}
 
 					// Fix cycle for integration verifier failures
 					if (task.agent === "wave-verifier" && result.exitCode !== 0) {
@@ -320,6 +370,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 							wave,
 							cwd,
 							specContent,
+							dataSchemas,
 							protectedPaths,
 							signal,
 						);
@@ -366,34 +417,45 @@ async function runTaskOnBase(
 	task: Task,
 	cwd: string,
 	specContent: string,
+	dataSchemas: string,
 	protectedPaths: string[],
 	signal?: AbortSignal,
 	onStallRetry?: (task: Task, reason: string) => void,
+	/** All files from the wave (for verifier context) */
+	allWaveFiles?: string[],
 ): Promise<Omit<TaskResult, "durationMs">> {
 	const agentName = task.agent || "worker";
 	const specContext = extractSpecSections(specContent, task.specRefs);
+	const schemasBlock = dataSchemas
+		? `\n## Data Schemas (authoritative — use these exact names)\n${dataSchemas}\n`
+		: "";
 
 	let agentTask: string;
 
 	if (agentName === "wave-verifier") {
+		const requiredFilesBlock = allWaveFiles && allWaveFiles.length > 0
+			? `\n## Required Files (MUST ALL EXIST)\nThese files should have been created by prior tasks in this wave. Verify EVERY one exists before running tests:\n${allWaveFiles.map(f => `- \`${f}\``).join("\n")}\n`
+			: "";
 		agentTask = `You are verifying completed work.
-
+${schemasBlock}
 ## Spec Reference
 ${specContext}
 
 ## Your Task
 **${task.id}: ${task.title}**
 ${task.files.length > 0 ? `Files to check: ${task.files.join(", ")}` : ""}
-
+${requiredFilesBlock}
 ${task.description}
 
-IMPORTANT:
-- Run the test suite and report results
-- Check for type errors, lint issues
+IMPORTANT — verify in this order:
+1. **File existence** — check that ALL required files listed above actually exist on disk. If ANY are missing, immediately report status "fail" with the list of missing files. Do NOT proceed to tests.
+2. **Syntax/compilation** — run the compiler/linter. If it fails, report "fail".
+3. **Tests** — run the test suite. If tests fail, report "fail".
+4. **Completeness** — verify the implementation matches the task descriptions.
 - Do NOT modify any files`;
 	} else if (agentName === "test-writer") {
 		agentTask = `You are writing tests.
-
+${schemasBlock}
 ## Spec Reference
 ${specContext}
 
@@ -405,14 +467,15 @@ ${task.description}
 
 IMPORTANT:
 - Only create/modify TEST files listed for this task
-- Follow existing test patterns`;
+- Follow existing test patterns
+- Use exact field names, column names, and type names from the Data Schemas section above`;
 	} else {
 		const testContext =
 			task.testFiles.length > 0
 				? `\nTests to satisfy: ${task.testFiles.join(", ")}\nYour implementation MUST make these tests pass.`
 				: "";
 		agentTask = `You are implementing code.
-
+${schemasBlock}
 ## Spec Reference
 ${specContext}
 
@@ -424,7 +487,8 @@ ${task.description}
 
 IMPORTANT:
 - Only modify files listed for this task
-- Follow the spec requirements exactly`;
+- Follow the spec requirements exactly
+- Use exact field names, column names, and type names from the Data Schemas section above — they are authoritative and override any names in the spec`;
 	}
 
 	// File access rules
@@ -479,6 +543,7 @@ async function runIntegrationFixCycle(
 	wave: Wave,
 	cwd: string,
 	specContent: string,
+	dataSchemas: string,
 	protectedPaths: string[],
 	signal?: AbortSignal,
 ): Promise<Omit<TaskResult, "durationMs"> | null> {
@@ -508,7 +573,7 @@ Fix the issues and ensure all tests pass.`;
 	});
 
 	// Re-verify (no stall callback — this is already inside a fix cycle)
-	const reResult = await runTaskOnBase(verifierTask, cwd, specContent, protectedPaths, signal);
+	const reResult = await runTaskOnBase(verifierTask, cwd, specContent, dataSchemas, protectedPaths, signal, undefined, allFiles);
 
 	let passed = reResult.exitCode === 0;
 	if (!passed) {

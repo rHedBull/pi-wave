@@ -755,6 +755,7 @@ Do NOT write any files. Just output the outline as your response.`;
 					wave,
 					waveNum: wi + 1,
 					specContent,
+					dataSchemas: plan.dataSchemas,
 					protectedPaths,
 					cwd: ctx.cwd,
 					maxConcurrency: MAX_CONCURRENCY,
@@ -842,6 +843,9 @@ Do NOT write any files. Just output the outline as your response.`;
 							{ triggerTurn: false },
 						);
 					}
+
+					writeLog();
+					break; // Stop at first failed wave — later waves depend on earlier ones
 				} else {
 					const allResults = [
 						...waveResult.foundationResults,
@@ -866,7 +870,8 @@ Do NOT write any files. Just output the outline as your response.`;
 			ctx.ui.setWidget("wave-progress", undefined);
 
 			logLines.push("---", "", `Finished: ${new Date().toISOString()}`);
-			logLines.push(`Result: ${allPassed ? "SUCCESS" : "COMPLETED WITH ISSUES"}`);
+			const stoppedEarly = !allPassed && waveResults.length < plan.waves.length;
+			logLines.push(`Result: ${allPassed ? "SUCCESS" : stoppedEarly ? "STOPPED — wave failed" : "COMPLETED WITH ISSUES"}`);
 			writeLog();
 
 			// Clean up state file on full success, keep it on failure for /waves-continue
@@ -874,11 +879,12 @@ Do NOT write any files. Just output the outline as your response.`;
 				deleteState(planFile);
 			}
 
-			const icon = allPassed ? "✅" : "⚠️";
-			let finalSummary = `# ${icon} Execution Complete\n\n`;
+			const icon = allPassed ? "✅" : "❌";
+			const verb = allPassed ? "Execution Complete" : stoppedEarly ? "Execution Stopped" : "Execution Complete (with issues)";
+			let finalSummary = `# ${icon} ${verb}\n\n`;
 			finalSummary += `**Goal:** ${plan.goal}\n`;
 			finalSummary += `**Tasks:** ${totalCompleted}/${totalTasks}\n`;
-			finalSummary += `**Waves:** ${waveResults.length}/${plan.waves.length}\n\n`;
+			finalSummary += `**Waves:** ${waveResults.length}/${plan.waves.length}${stoppedEarly ? " (stopped at failure)" : ""}\n\n`;
 
 			for (const wr of waveResults) {
 				const allResults = [
@@ -894,6 +900,9 @@ Do NOT write any files. Just output the outline as your response.`;
 				finalSummary += `${wIcon} **${wr.wave}**: ${passed}/${allResults.length} tasks${featureInfo}\n`;
 			}
 
+			if (!allPassed) {
+				finalSummary += `\nRun \`/waves-continue\` to retry after fixing issues.`;
+			}
 			finalSummary += `\n📄 Execution log: \`${path.relative(ctx.cwd, logPath)}\``;
 
 			pi.sendMessage(
@@ -903,7 +912,7 @@ Do NOT write any files. Just output the outline as your response.`;
 
 			ctx.ui.setStatus("waves", allPassed
 				? ctx.ui.theme.fg("success", `✅ Done — ${totalCompleted} tasks`)
-				: ctx.ui.theme.fg("warning", `⚠️ Done (issues) — ${totalCompleted} tasks`),
+				: ctx.ui.theme.fg("error", `❌ Stopped — wave ${waveResults.length} failed. /waves-continue to retry`),
 			);
 			setTimeout(() => ctx.ui.setStatus("waves", undefined), 15000);
 		},
@@ -1153,6 +1162,7 @@ Do NOT write any files. Just output the outline as your response.`;
 					wave,
 					waveNum: wi + 1,
 					specContent,
+					dataSchemas: plan.dataSchemas,
 					protectedPaths,
 					cwd: ctx.cwd,
 					maxConcurrency: MAX_CONCURRENCY,
