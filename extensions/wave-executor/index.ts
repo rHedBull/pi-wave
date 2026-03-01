@@ -650,7 +650,10 @@ Do NOT write any files. Just output the outline as your response.`;
 				`Architecture: feature-parallel DAG`,
 				``,
 			];
-			const writeLog = () => fs.writeFileSync(logPath, logLines.join("\n"), "utf-8");
+			const writeLog = () => {
+				fs.mkdirSync(path.dirname(logPath), { recursive: true });
+				fs.writeFileSync(logPath, logLines.join("\n"), "utf-8");
+			};
 
 			// Protected paths — don't let agents modify the spec or plan during execution
 			const protectedPaths = [planFile, ...(spec ? [spec] : [])];
@@ -913,14 +916,32 @@ Do NOT write any files. Just output the outline as your response.`;
 		handler: async (args, ctx) => {
 			if (!args?.trim()) {
 				// Find plan files with state files
-				const projects = listWaveProjects(ctx.cwd);
 				const resumable: string[] = [];
+
+				// Check standard project dirs (docs/plan/<project>/)
+				const projects = listWaveProjects(ctx.cwd);
 				for (const p of projects) {
 					const pf = findPlanFile(ctx.cwd, p);
 					if (pf && fs.existsSync(stateFilePath(pf))) {
 						resumable.push(path.relative(ctx.cwd, pf));
 					}
 				}
+
+				// Also check for .state.json files in the project root (plan files not in docs/plan/)
+				try {
+					const rootFiles = fs.readdirSync(ctx.cwd);
+					for (const f of rootFiles) {
+						if (f.endsWith(".md.state.json")) {
+							const planName = f.replace(/\.state\.json$/, "");
+							const planPath = path.join(ctx.cwd, planName);
+							if (fs.existsSync(planPath)) {
+								const rel = path.relative(ctx.cwd, planPath);
+								if (!resumable.includes(rel)) resumable.push(rel);
+							}
+						}
+					}
+				} catch {}
+
 				if (resumable.length > 0) {
 					ctx.ui.notify(`Usage: /waves-continue <plan-file-or-project>\n\nResumable:\n${resumable.map((f) => `  ${f}`).join("\n")}`, "info");
 				} else {
@@ -1039,7 +1060,10 @@ Do NOT write any files. Just output the outline as your response.`;
 				`Plan: ${relPlanFile}`,
 				``,
 			];
-			const writeLog = () => fs.writeFileSync(logPath, logLines.join("\n"), "utf-8");
+			const writeLog = () => {
+				fs.mkdirSync(path.dirname(logPath), { recursive: true });
+				fs.writeFileSync(logPath, logLines.join("\n"), "utf-8");
+			};
 
 			const protectedPaths = [planFile, ...(spec ? [spec] : [])];
 
