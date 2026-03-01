@@ -10,6 +10,7 @@
 import {
 	checkpointChanges,
 	cleanupAll,
+	commitTaskOutput,
 	createFeatureWorktree,
 	getCurrentBranch,
 	getRepoRoot,
@@ -50,10 +51,6 @@ export interface WaveExecutorOptions {
 	signal?: AbortSignal;
 	/** Task IDs to skip (already completed in a previous run). */
 	skipTaskIds?: Set<string>;
-	/** Whether foundation was already committed in a previous run of this wave. */
-	skipFoundationCommit?: boolean;
-	/** Whether features were already merged in a previous run of this wave. */
-	skipFeatureMerge?: boolean;
 	onProgress?: (update: ProgressUpdate) => void;
 	onTaskStart?: (phase: string, task: Task) => void;
 	onTaskEnd?: (phase: string, task: Task, result: TaskResult) => void;
@@ -76,8 +73,6 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 		maxConcurrency,
 		signal,
 		skipTaskIds = new Set(),
-		skipFoundationCommit = false,
-		skipFeatureMerge = false,
 		onProgress,
 		onTaskStart,
 		onTaskEnd,
@@ -164,6 +159,11 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 						}
 					}
 
+					// Per-task commit — each successful task gets its own commit
+					if (taskResult.exitCode === 0 && useGit && repoRoot) {
+						commitTaskOutput(repoRoot, task.id, task.title, task.agent);
+					}
+
 					onTaskEnd?.("foundation", task, taskResult);
 					logTaskResult(onLog, task, taskResult);
 					return taskResult;
@@ -182,22 +182,6 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 					integrationResults,
 					passed: false,
 				};
-			}
-
-			// Commit foundation to base branch (skip if already committed in previous run)
-			if (useGit && repoRoot && !skipFoundationCommit) {
-				try {
-					if (hasUncommittedChanges(repoRoot)) {
-						const { execSync } = await import("node:child_process");
-						execSync("git add -A", { cwd: repoRoot, stdio: "pipe" });
-						execSync(
-							`git commit -m "pi: wave ${waveNum} foundation"`,
-							{ cwd: repoRoot, stdio: "pipe" },
-						);
-					}
-				} catch {
-					// Commit failure is non-fatal — features still run
-				}
 			}
 
 			onLog?.("");
@@ -377,6 +361,11 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 						if (fixResult) {
 							taskResult = { ...fixResult, durationMs: Date.now() - start };
 						}
+					}
+
+					// Per-task commit — each successful task gets its own commit
+					if (taskResult.exitCode === 0 && useGit && repoRoot) {
+						commitTaskOutput(repoRoot, task.id, task.title, task.agent);
 					}
 
 					onTaskEnd?.("integration", task, taskResult);

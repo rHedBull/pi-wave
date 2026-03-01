@@ -1168,8 +1168,6 @@ Do NOT write any files. Just output the outline as your response.`;
 					maxConcurrency: MAX_CONCURRENCY,
 					signal: controller.signal,
 					skipTaskIds: currentSkipSet,
-					skipFoundationCommit: execState.foundationCommitted,
-					skipFeatureMerge: execState.featuresMerged,
 					onProgress: (update) => {
 						currentPhase = update.phase;
 						updateWidget();

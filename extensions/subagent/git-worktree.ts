@@ -81,6 +81,44 @@ export function restoreCheckpoint(repoRoot: string, checkpointSha: string | null
 	}
 }
 
+// ── Per-Task Commits ─────────────────────────────────────────────────────
+
+/**
+ * Commit a single task's output with a descriptive message.
+ * Called after each task completes successfully and passes file-existence checks.
+ *
+ * Commit format: `pi: {taskId} [{agentTag}] — {title}`
+ * Examples:
+ *   pi: w1-found-t1 [worker] — shared types and migrations
+ *   pi: w1-auth-t2 [test] — auth service tests
+ *
+ * Returns true if a commit was made, false if nothing to commit or not a git repo.
+ */
+export function commitTaskOutput(
+	cwd: string,
+	taskId: string,
+	title: string,
+	agent: string,
+): boolean {
+	try {
+		if (!isGitRepo(cwd)) return false;
+		if (!hasUncommittedChanges(cwd)) return false;
+
+		const agentTag = agent === "test-writer" ? "test"
+			: agent === "wave-verifier" ? "verify"
+			: "worker";
+
+		// Sanitize title for commit message (remove quotes, limit length)
+		const safeTitle = title.replace(/"/g, "'").slice(0, 80);
+
+		git("add -A", cwd);
+		git(`commit -m "pi: ${taskId} [${agentTag}] — ${safeTitle}"`, cwd);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 // ── Feature Worktrees ────────────────────────────────────────────────────
 
 /**
@@ -184,7 +222,7 @@ export function createSubWorktrees(
 export function mergeSubWorktrees(
 	featureWorktree: FeatureWorktree,
 	subWorktrees: SubWorktree[],
-	results: { taskId: string; exitCode: number }[],
+	results: { taskId: string; exitCode: number; title?: string; agent?: string }[],
 ): MergeResult[] {
 	const mergeResults: MergeResult[] = [];
 	const resultMap = new Map(results.map((r) => [r.taskId, r]));
@@ -195,8 +233,12 @@ export function mergeSubWorktrees(
 		if (result && result.exitCode === 0) {
 			try {
 				if (hasUncommittedChanges(sw.dir)) {
+					const agentTag = result.agent === "test-writer" ? "test"
+						: result.agent === "wave-verifier" ? "verify"
+						: "worker";
+					const safeTitle = (result.title ?? sw.taskId).replace(/"/g, "'").slice(0, 80);
 					git("add -A", sw.dir);
-					git(`commit -m "pi: ${sw.taskId}"`, sw.dir);
+					git(`commit -m "pi: ${sw.taskId} [${agentTag}] — ${safeTitle}"`, sw.dir);
 				}
 			} catch {
 				// Commit failure — branch stays as-is

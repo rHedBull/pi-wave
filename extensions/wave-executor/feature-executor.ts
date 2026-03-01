@@ -11,6 +11,7 @@
  */
 
 import {
+	commitTaskOutput,
 	createSubWorktrees,
 	mergeSubWorktrees,
 } from "../subagent/git-worktree.js";
@@ -200,6 +201,12 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 					}
 				}
 
+				// Per-task commit — sequential tasks in feature worktree (or base branch)
+				// Sub-worktree tasks are committed during mergeSubWorktrees instead.
+				if (taskResult.exitCode === 0 && !actuallyParallel) {
+					commitTaskOutput(taskCwd, task.id, task.title, task.agent);
+				}
+
 				if (taskResult.exitCode !== 0) {
 					failedIds.add(task.id);
 				}
@@ -216,7 +223,7 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 			mergeSubWorktrees(
 				featureWorktree!,
 				subWorktrees,
-				levelResults.map((r) => ({ taskId: r.id, exitCode: r.exitCode })),
+				levelResults.map((r) => ({ taskId: r.id, exitCode: r.exitCode, title: r.title, agent: r.agent })),
 			);
 		}
 	}

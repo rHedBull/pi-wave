@@ -8,6 +8,9 @@
 
 export interface Plan {
 	goal: string;
+	/** Complete data schemas section from the plan — SQL DDL, shared types, API signatures.
+	 *  Passed verbatim to every executing agent as the single source of truth for naming. */
+	dataSchemas: string;
 	waves: Wave[];
 }
 
@@ -124,10 +127,10 @@ export interface ExecutionState {
 	currentWave: number;
 	/** Per-task completion status. Only "done" tasks are skipped on resume. */
 	taskStates: Record<string, "done" | "failed" | "skipped">;
-	/** Whether foundation was committed to git in the current wave */
-	foundationCommitted: boolean;
-	/** Whether feature branches were merged in the current wave */
-	featuresMerged: boolean;
+	/** @deprecated Per-task commits replaced the bulk foundation commit. Kept for state file compat. */
+	foundationCommitted?: boolean;
+	/** @deprecated Unused — feature merge is handled by the merge phase. Kept for state file compat. */
+	featuresMerged?: boolean;
 }
 
 // ── Progress ───────────────────────────────────────────────────────
