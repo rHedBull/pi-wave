@@ -11,6 +11,16 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { FileAccessRules } from "./types.js";
 
+// ── Version ────────────────────────────────────────────────────────
+
+/** Read version from package.json (single source of truth). */
+export const VERSION: string = (() => {
+	try {
+		const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "package.json"), "utf-8"));
+		return pkg.version || "unknown";
+	} catch { return "unknown"; }
+})();
+
 // ── Post-Task File Verification ────────────────────────────────────
 
 /**
@@ -708,7 +718,7 @@ export function runSubagent(
 			try {
 				fs.mkdirSync(path.dirname(logFile), { recursive: true });
 				logFd = fs.openSync(logFile, "w");
-				fs.writeSync(logFd, `=== Agent: ${agentName} ===\n`);
+				fs.writeSync(logFd, `=== Agent: ${agentName} | pi-wave v${VERSION} ===\n`);
 				if (logContext) {
 					for (const line of logContext) fs.writeSync(logFd, `${line}\n`);
 				}

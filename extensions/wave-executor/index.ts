@@ -35,6 +35,7 @@ import {
 	runSubagent,
 	slugify,
 	specPath,
+	VERSION,
 } from "./helpers.js";
 import { parsePlanV2 } from "./plan-parser.js";
 import { buildBrainstormPrompt, buildPlanReviewPrompt, parseSpecArgs } from "./prompts.js";
@@ -137,7 +138,7 @@ export default function (pi: ExtensionAPI) {
 			const file = specPath(ctx.cwd, projectName);
 			const relFile = path.relative(ctx.cwd, file);
 
-			const brainstormPrompt = buildBrainstormPrompt(scope, query, projectName, scoutOutput, relFile);
+			const brainstormPrompt = buildBrainstormPrompt(scope, query, projectName, scoutOutput, relFile, VERSION);
 
 			ctx.ui.notify(`${scopeEmoji} Scout complete. Starting brainstorming session...`, "info");
 
@@ -265,7 +266,7 @@ Do NOT write any files. Just output the outline as your response.`;
 			const file = planPath(ctx.cwd, projectName);
 			const relPlan = path.relative(ctx.cwd, file);
 
-			const reviewPrompt = buildPlanReviewPrompt(projectName, relSpec, relPlan, outlineOutput, extra);
+			const reviewPrompt = buildPlanReviewPrompt(projectName, relSpec, relPlan, outlineOutput, extra, VERSION);
 
 			ctx.ui.notify("📋 Outline ready. Review the milestones and parallelization...", "info");
 
@@ -442,6 +443,7 @@ Do NOT write any files. Just output the outline as your response.`;
 			const logLines: string[] = [
 				`# Execution Log`,
 				``,
+				`pi-wave v${VERSION}`,
 				`Started: ${new Date().toISOString()}`,
 				`Spec: ${relSpecFile}`,
 				`Plan: ${relPlanFile}`,
@@ -596,6 +598,7 @@ Do NOT write any files. Just output the outline as your response.`;
 			const logLines: string[] = [
 				`# Execution Log (resumed)`,
 				``,
+				`pi-wave v${VERSION}`,
 				`Resumed: ${new Date().toISOString()}`,
 				`Previous run: ${prevState.startedAt}`,
 				`Resuming from wave: ${resumeWave + 1}`,

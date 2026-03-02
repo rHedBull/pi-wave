@@ -22,7 +22,7 @@ export function parseSpecArgs(args: string): { scope: Scope; query: string } | n
 
 // ── Brainstorm Prompt ──────────────────────────────────────────────
 
-export function buildBrainstormPrompt(scope: Scope, query: string, projectName: string, scoutContext: string, specFilePath: string): string {
+export function buildBrainstormPrompt(scope: Scope, query: string, projectName: string, scoutContext: string, specFilePath: string, version?: string): string {
 	const scopeLabel = scope === "hack" ? "quick hack" : scope === "enterprise" ? "enterprise-grade" : "standard";
 
 	const scopeGuidance = scope === "hack"
@@ -91,7 +91,7 @@ ${scopeGuidance}
 - Ask ONE question per message. If a topic needs more exploration, break it into multiple messages.
 - If the user's answer covers multiple topics at once, acknowledge that and move on — don't re-ask about things already answered.
 - If a topic from the checklist is clearly not relevant (e.g., API versioning for an internal refactor), briefly note you're skipping it and why.
-- When you DO write the spec, save it to \`${specFilePath}\` using the write tool.
+- When you DO write the spec, save it to \`${specFilePath}\` using the write tool.${version ? `\n- Include \`<!-- pi-wave v${version} -->\` at the very end of the spec file.` : ""}
 - After writing the spec, tell the user: "Next step: \`/waves-plan ${projectName}\` to create the implementation plan."
 
 ## Spec Format (when ready to write)
@@ -151,7 +151,7 @@ Now, start by presenting the scout findings and asking your first question.`;
 
 // ── Plan Review Prompt ─────────────────────────────────────────────
 
-export function buildPlanReviewPrompt(projectName: string, relSpec: string, relPlan: string, outlineOutput: string, extraInstructions: string): string {
+export function buildPlanReviewPrompt(projectName: string, relSpec: string, relPlan: string, outlineOutput: string, extraInstructions: string, version?: string): string {
 	return `# Plan Review: ${projectName}
 
 A planner agent has drafted an outline for the implementation plan. Your job is to **present it to the user for review**, focusing on:
@@ -260,5 +260,6 @@ Files: list of files this feature owns
 4. Verify no two parallel features write to the same file
 5. If ANY violations are found, fix them (remove invalid cross-section deps, move files to foundation) and rewrite the plan
 
-Only after validation passes, tell the user: "Next step: \`/waves-execute ${projectName}\`"`;
+Only after validation passes, tell the user: "Next step: \`/waves-execute ${projectName}\`"
+${version ? `\nIMPORTANT: Include \`<!-- pi-wave v${version} -->\` at the very end of the plan file.` : ""}`;
 }
