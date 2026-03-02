@@ -704,8 +704,8 @@ Do NOT write any files. Just output the outline as your response.`;
 			// Protected paths — don't let agents modify the spec or plan during execution
 			const protectedPaths = [planFile, ...(spec ? [spec] : [])];
 
-			// Per-task log directory
-			const taskLogDir = createTaskLogDir(ctx.cwd, projectName);
+			// Per-task log directory (tied to execution version: execution-v3.md → logs-v3/)
+			const taskLogDir = createTaskLogDir(logPath);
 
 			// Execution state for resume capability
 			const execState = createInitialState(planFile);
@@ -1160,8 +1160,8 @@ Do NOT write any files. Just output the outline as your response.`;
 
 			const protectedPaths = [planFile, ...(spec ? [spec] : [])];
 
-			// Per-task log directory
-			const taskLogDir = createTaskLogDir(ctx.cwd, projectName);
+			// Per-task log directory (tied to execution version)
+			const taskLogDir = createTaskLogDir(logPath);
 
 			// Reuse the previous state (with completed task tracking)
 			const execState = prevState;

@@ -345,19 +345,15 @@ export function migrateLooseFiles(cwd: string): string[] {
 // ── Task Log Paths ─────────────────────────────────────────────────
 
 /**
- * Create the task logs directory for the current execution.
- * Returns the directory path. Logs dir is cleared on each new execution.
+ * Create the task logs directory for this execution run.
+ * Tied to the execution version: execution-v3.md → logs-v3/
+ * Each execution gets its own log directory — no merging between runs.
  */
-export function createTaskLogDir(cwd: string, name: string): string {
-	const dir = path.join(projectDir(cwd, name), "logs");
-	// Clear previous logs
-	if (fs.existsSync(dir)) {
-		for (const f of fs.readdirSync(dir)) {
-			try { fs.unlinkSync(path.join(dir, f)); } catch { /* ignore */ }
-		}
-	} else {
-		fs.mkdirSync(dir, { recursive: true });
-	}
+export function createTaskLogDir(executionLogPath: string): string {
+	const match = path.basename(executionLogPath).match(/execution-v(\d+)\.md$/);
+	const version = match ? match[1] : "1";
+	const dir = path.join(path.dirname(executionLogPath), `logs-v${version}`);
+	fs.mkdirSync(dir, { recursive: true });
 	return dir;
 }
 
