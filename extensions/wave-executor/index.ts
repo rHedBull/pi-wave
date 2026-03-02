@@ -30,6 +30,7 @@ import {
 	writeState,
 } from "./state.js";
 import {
+	allVersions,
 	ensureProjectDir,
 	extractFinalOutput,
 	extractSpecRef,
@@ -39,11 +40,13 @@ import {
 	listWaveProjects,
 	logFilePath,
 	planPath,
-	projectSlug,
+	projectDir,
+	projectSummary,
 	resolveProject,
 	runSubagent,
 	slugify,
 	specPath,
+	versionedFiles,
 } from "./helpers.js";
 import { parsePlanV2 } from "./plan-parser.js";
 import type { Plan, Task, TaskResult } from "./types.js";
@@ -69,17 +72,10 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			let summary = `**Wave projects** in \`docs/spec/\` and \`docs/plan/\`:\n\n`;
+			let summary = `**Wave projects** in \`.pi/waves/\`:\n\n`;
 			for (const name of projects) {
-				const hasSpec = !!findSpecFile(ctx.cwd, name);
-				const hasPlan = !!findPlanFile(ctx.cwd, name);
-				const hasLog = false; // execution logs are in the plan dir, covered by hasPlan
-				const icons = [
-					hasSpec ? "📄 SPEC" : null,
-					hasPlan ? "📋 PLAN" : null,
-					hasLog ? "📝 LOG" : null,
-				].filter(Boolean).join("  ");
-				summary += `- **${name}**  ${icons}\n`;
+				const info = projectSummary(ctx.cwd, name);
+				summary += `- **${name}**  ${info}\n`;
 			}
 			summary += `\nCommands: \`/waves-spec <task>\`, \`/waves-plan <name>\`, \`/waves-execute <name>\``;
 
@@ -396,31 +392,33 @@ Only after validation passes, tell the user: "Next step: \`/waves-execute ${proj
 	}
 
 	pi.registerCommand("waves-plan", {
-		description: "Create PLAN.md for a wave project (e.g. /waves-plan my-spec.md or /waves-plan project-name)",
+		description: "Create a plan for a wave project (e.g. /waves-plan my-project)",
 		handler: async (args, ctx) => {
 			let projectName: string;
 			let extraInstructions: string;
 			let spec: string;
 
 			if (!args?.trim()) {
-				// No args: try to find a spec in cwd or list known projects
-				const cwdSpec = findSpecFile(ctx.cwd, "SPEC.md");
-				if (cwdSpec) {
-					projectName = slugify(path.basename(ctx.cwd));
+				// No args: show available projects
+				const projects = listWaveProjects(ctx.cwd);
+				const withSpecs = projects.filter((p) => findSpecFile(ctx.cwd, p));
+
+				if (withSpecs.length === 1) {
+					// Only one project with a spec — use it automatically
+					projectName = withSpecs[0];
 					extraInstructions = "";
-					spec = cwdSpec;
-				} else {
-					const projects = listWaveProjects(ctx.cwd);
-					const ready = projects.filter((p) =>
-						findSpecFile(ctx.cwd, p) && !findPlanFile(ctx.cwd, p)
-					);
-					if (ready.length > 0) {
-						ctx.ui.notify(`Usage: /waves-plan <name-or-file>\nReady for planning: ${ready.join(", ")}`, "info");
-					} else if (projects.length > 0) {
-						ctx.ui.notify(`Usage: /waves-plan <name-or-file> [extra instructions]\nProjects: ${projects.join(", ")}`, "info");
-					} else {
-						ctx.ui.notify("No spec files found. Run /waves-spec <task> or provide a path to a spec file.", "info");
+					spec = findSpecFile(ctx.cwd, projectName)!;
+				} else if (withSpecs.length > 0) {
+					let msg = "Available projects with specs:\n";
+					for (const p of withSpecs) {
+						const info = projectSummary(ctx.cwd, p);
+						msg += `  • **${p}**  ${info}\n`;
 					}
+					msg += `\nUsage: \`/waves-plan <project> [extra instructions]\``;
+					ctx.ui.notify(msg, "info");
+					return;
+				} else {
+					ctx.ui.notify("No specs found. Run /waves-spec <task> first.", "info");
 					return;
 				}
 			} else {
@@ -428,22 +426,18 @@ Only after validation passes, tell the user: "Next step: \`/waves-execute ${proj
 				const firstArg = parts[0];
 				extraInstructions = parts.slice(1).join(" ");
 
-				// Try to find a spec file from the argument
-				const found = findSpecFile(ctx.cwd, firstArg);
+				// Resolve project name
+				projectName = resolveProject(ctx.cwd, firstArg);
+				const found = findSpecFile(ctx.cwd, projectName);
+
 				if (found) {
 					spec = found;
-					// Derive clean project name — strip extensions, timestamps, labels
-					projectName = projectSlug(path.basename(found)) || projectSlug(path.basename(path.dirname(found)));
 				} else {
-					ctx.ui.notify(
-						`No spec file found for "${firstArg}". Looked for:\n` +
-						`  • ${firstArg} (as file path)\n` +
-						`  • docs/spec/${slugify(firstArg)}/SPEC.md\n` +
-						`  • docs/spec/${slugify(firstArg)}/*.md\n` +
-						`  • docs/spec/${slugify(firstArg)}.md\n\n` +
-						`Run /waves-spec <task> or provide a path to a spec file.`,
-						"error",
-					);
+					const projects = listWaveProjects(ctx.cwd);
+					const hint = projects.length > 0
+						? `\nKnown projects: ${projects.join(", ")}`
+						: "\nRun /waves-spec <task> to create one.";
+					ctx.ui.notify(`No spec found for "${firstArg}".${hint}`, "error");
 					return;
 				}
 			}
@@ -515,23 +509,28 @@ Do NOT write any files. Just output the outline as your response.`;
 	// ── /waves-execute ───────────────────────────────────────────────
 
 	pi.registerCommand("waves-execute", {
-		description: "Execute a plan file (e.g. /waves-execute docs/plan/my-project/my-project-plan-2026-02-27_18-30.md)",
+		description: "Execute a wave plan (e.g. /waves-execute my-project)",
 		handler: async (args, ctx) => {
 			if (!args?.trim()) {
+				// No args: show available projects with plans, or auto-select if only one
 				const projects = listWaveProjects(ctx.cwd);
-				const ready = projects.filter((p) => !!findPlanFile(ctx.cwd, p));
-				if (ready.length > 0) {
-					// Show actual plan files, not just project names
-					const planFiles: string[] = [];
-					for (const p of ready) {
-						const pf = findPlanFile(ctx.cwd, p);
-						if (pf) planFiles.push(path.relative(ctx.cwd, pf));
+				const withPlans = projects.filter((p) => !!findPlanFile(ctx.cwd, p));
+				if (withPlans.length === 1) {
+					// Auto-select the only project
+					args = withPlans[0];
+				} else if (withPlans.length > 0) {
+					let msg = "Available projects with plans:\n";
+					for (const p of withPlans) {
+						const info = projectSummary(ctx.cwd, p);
+						msg += `  • **${p}**  ${info}\n`;
 					}
-					ctx.ui.notify(`Usage: /waves-execute <plan-file-or-project>\n\nReady to execute:\n${planFiles.map((f) => `  ${f}`).join("\n")}`, "info");
+					msg += `\nUsage: \`/waves-execute <project>\``;
+					ctx.ui.notify(msg, "info");
+					return;
 				} else {
 					ctx.ui.notify("No plan files found. Run /waves-plan first.", "info");
+					return;
 				}
-				return;
 			}
 
 			// Resolve the plan file — accept a direct path or a project name
@@ -543,11 +542,27 @@ Do NOT write any files. Just output the outline as your response.`;
 			const asPath = path.resolve(ctx.cwd, input);
 			if (fs.existsSync(asPath) && fs.statSync(asPath).isFile()) {
 				planFile = asPath;
-				projectName = projectSlug(path.basename(asPath));
+				// Derive project name from parent directory
+				const parentDir = path.basename(path.dirname(asPath));
+				projectName = parentDir;
 			} else {
 				// 2. Try as a project name
 				projectName = resolveProject(ctx.cwd, input);
-				planFile = findPlanFile(ctx.cwd, projectName);
+
+				// Show available plan versions if multiple exist
+				const dir = projectDir(ctx.cwd, projectName);
+				const plans = allVersions(dir, "plan");
+
+				if (plans.length > 1) {
+					// Use latest, but inform the user
+					planFile = plans[plans.length - 1].path;
+					ctx.ui.notify(
+						`Using latest: ${plans[plans.length - 1].file} (${plans.length} versions available)`,
+						"info",
+					);
+				} else {
+					planFile = findPlanFile(ctx.cwd, projectName);
+				}
 			}
 
 			if (!planFile) {
@@ -555,7 +570,7 @@ Do NOT write any files. Just output the outline as your response.`;
 				const hint = projects.length > 0
 					? `\nKnown projects: ${projects.join(", ")}`
 					: "";
-				ctx.ui.notify(`No plan file found for "${input}".${hint}`, "error");
+				ctx.ui.notify(`No plan found for "${input}".${hint}`, "error");
 				return;
 			}
 
@@ -926,42 +941,32 @@ Do NOT write any files. Just output the outline as your response.`;
 		description: "Resume a failed wave execution from where it left off",
 		handler: async (args, ctx) => {
 			if (!args?.trim()) {
-				// Find plan files with state files
-				const resumable: string[] = [];
-
-				// Check standard project dirs (docs/plan/<project>/)
+				// Find projects with state.json files
 				const projects = listWaveProjects(ctx.cwd);
-				for (const p of projects) {
-					const pf = findPlanFile(ctx.cwd, p);
-					if (pf && fs.existsSync(stateFilePath(pf))) {
-						resumable.push(path.relative(ctx.cwd, pf));
-					}
-				}
+				const resumable = projects.filter((p) => {
+					const stateFile = path.join(projectDir(ctx.cwd, p), "state.json");
+					return fs.existsSync(stateFile);
+				});
 
-				// Also check for .state.json files in the project root (plan files not in docs/plan/)
-				try {
-					const rootFiles = fs.readdirSync(ctx.cwd);
-					for (const f of rootFiles) {
-						if (f.endsWith(".md.state.json")) {
-							const planName = f.replace(/\.state\.json$/, "");
-							const planPath = path.join(ctx.cwd, planName);
-							if (fs.existsSync(planPath)) {
-								const rel = path.relative(ctx.cwd, planPath);
-								if (!resumable.includes(rel)) resumable.push(rel);
-							}
-						}
+				if (resumable.length === 1) {
+					// Auto-select the only resumable project
+					args = resumable[0];
+				} else if (resumable.length > 0) {
+					let msg = "Resumable projects:\n";
+					for (const p of resumable) {
+						const info = projectSummary(ctx.cwd, p);
+						msg += `  • **${p}**  ${info}\n`;
 					}
-				} catch {}
-
-				if (resumable.length > 0) {
-					ctx.ui.notify(`Usage: /waves-continue <plan-file-or-project>\n\nResumable:\n${resumable.map((f) => `  ${f}`).join("\n")}`, "info");
+					msg += `\nUsage: \`/waves-continue <project>\``;
+					ctx.ui.notify(msg, "info");
+					return;
 				} else {
 					ctx.ui.notify("No resumable executions found. State files are created during /waves-execute and removed on success.", "info");
+					return;
 				}
-				return;
 			}
 
-			// Resolve plan file (same logic as /waves-execute)
+			// Resolve plan file
 			let planFile: string | null = null;
 			let projectName: string;
 			const input = args.trim();
@@ -969,14 +974,18 @@ Do NOT write any files. Just output the outline as your response.`;
 			const asPath = path.resolve(ctx.cwd, input);
 			if (fs.existsSync(asPath) && fs.statSync(asPath).isFile()) {
 				planFile = asPath;
-				projectName = projectSlug(path.basename(asPath));
+				projectName = path.basename(path.dirname(asPath));
 			} else {
 				projectName = resolveProject(ctx.cwd, input);
 				planFile = findPlanFile(ctx.cwd, projectName);
 			}
 
 			if (!planFile) {
-				ctx.ui.notify(`No plan file found for "${input}".`, "error");
+				const projects = listWaveProjects(ctx.cwd);
+				const hint = projects.length > 0
+					? `\nKnown projects: ${projects.join(", ")}`
+					: "";
+				ctx.ui.notify(`No plan found for "${input}".${hint}`, "error");
 				return;
 			}
 

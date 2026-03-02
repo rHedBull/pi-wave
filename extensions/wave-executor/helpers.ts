@@ -112,6 +112,10 @@ export function extractFinalOutput(jsonLines: string): string {
 }
 
 // ── Path Helpers ───────────────────────────────────────────────────
+//
+// All wave project files live under .pi/waves/<project>/:
+//   spec-v1.md, spec-v2.md, plan-v1.md, execution-v1.md, state.json
+//
 
 export function slugify(text: string): string {
 	return text
@@ -121,186 +125,164 @@ export function slugify(text: string): string {
 		.slice(0, 60);
 }
 
+function wavesBaseDir(cwd: string): string {
+	return path.join(cwd, ".pi", "waves");
+}
+
+export function projectDir(cwd: string, name: string): string {
+	return path.join(wavesBaseDir(cwd), name);
+}
+
+export function ensureProjectDir(cwd: string, name: string): void {
+	const dir = projectDir(cwd, name);
+	if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+// ── Versioned File Helpers ─────────────────────────────────────────
+
+type FileType = "spec" | "plan" | "execution";
+
 /**
- * Derive a clean project slug from a filename or user input.
- * Strips: file extensions, "spec"/"plan"/"execution" labels, timestamps.
+ * List versioned files of a given type in a directory, sorted by version ascending.
+ * Matches: spec-v1.md, plan-v3.md, execution-v2.md
  */
-export function projectSlug(input: string): string {
-	let name = path.basename(input, path.extname(input)); // strip .md etc.
-	name = name
-		.replace(/[-_]?(spec|plan|execution)[-_]?/gi, "") // strip labels
-		.replace(/[-_]?\d{4}-\d{2}-\d{2}[-_T]?\d{2}[-:]\d{2}([-:]\d{2})?/g, "") // strip timestamps
-		.replace(/^-+|-+$/g, ""); // trim leftover dashes
-	return slugify(name || input);
+export function versionedFiles(dir: string, type: FileType): { file: string; version: number }[] {
+	if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
+	const regex = new RegExp(`^${type}-v(\\d+)\\.md$`);
+	return fs.readdirSync(dir)
+		.map((f) => {
+			const m = f.match(regex);
+			return m ? { file: f, version: parseInt(m[1], 10) } : null;
+		})
+		.filter((x): x is { file: string; version: number } => x !== null)
+		.sort((a, b) => a.version - b.version);
+}
+
+function nextVersion(dir: string, type: FileType): number {
+	const existing = versionedFiles(dir, type);
+	return existing.length > 0 ? existing[existing.length - 1].version + 1 : 1;
+}
+
+/**
+ * Get the latest versioned file of a given type. Returns null if none found.
+ */
+export function latestFile(dir: string, type: FileType): string | null {
+	const files = versionedFiles(dir, type);
+	if (files.length > 0) return path.join(dir, files[files.length - 1].file);
+
+	// Legacy fallback: SPEC.md / PLAN.md
+	const legacyName = type === "spec" ? "SPEC.md" : type === "plan" ? "PLAN.md" : null;
+	if (legacyName) {
+		const legacy = path.join(dir, legacyName);
+		if (fs.existsSync(legacy)) return legacy;
+	}
+	return null;
+}
+
+/**
+ * List all versions of a file type with full paths.
+ */
+export function allVersions(dir: string, type: FileType): { file: string; version: number; path: string }[] {
+	return versionedFiles(dir, type).map((f) => ({ ...f, path: path.join(dir, f.file) }));
+}
+
+// ── Write Paths (create next version) ──────────────────────────────
+
+export function specPath(cwd: string, name: string): string {
+	const dir = projectDir(cwd, name);
+	const v = nextVersion(dir, "spec");
+	return path.join(dir, `spec-v${v}.md`);
+}
+
+export function planPath(cwd: string, name: string): string {
+	const dir = projectDir(cwd, name);
+	const v = nextVersion(dir, "plan");
+	return path.join(dir, `plan-v${v}.md`);
+}
+
+export function logFilePath(cwd: string, name: string): string {
+	const dir = projectDir(cwd, name);
+	const v = nextVersion(dir, "execution");
+	return path.join(dir, `execution-v${v}.md`);
+}
+
+// ── Find Paths (locate existing files) ─────────────────────────────
+
+/**
+ * Find a spec file. Checks:
+ * 1. Exact file path (absolute or relative to cwd)
+ * 2. Latest spec-v*.md in .pi/waves/<name>/
+ */
+export function findSpecFile(cwd: string, nameOrPath: string): string | null {
+	// 1. Exact path
+	const asPath = path.resolve(cwd, nameOrPath);
+	if (fs.existsSync(asPath) && fs.statSync(asPath).isFile()) return asPath;
+
+	// 2. Latest versioned spec in project dir
+	return latestFile(projectDir(cwd, slugify(nameOrPath)), "spec");
+}
+
+/**
+ * Find a plan file. Checks:
+ * 1. Exact file path (absolute or relative to cwd)
+ * 2. Latest plan-v*.md in .pi/waves/<name>/
+ */
+export function findPlanFile(cwd: string, nameOrPath: string): string | null {
+	// 1. Exact path
+	const asPath = path.resolve(cwd, nameOrPath);
+	if (fs.existsSync(asPath) && fs.statSync(asPath).isFile()) return asPath;
+
+	// 2. Latest versioned plan in project dir
+	return latestFile(projectDir(cwd, slugify(nameOrPath)), "plan");
+}
+
+// ── Project Listing & Resolution ───────────────────────────────────
+
+export function listWaveProjects(cwd: string): string[] {
+	const dir = wavesBaseDir(cwd);
+	if (!fs.existsSync(dir)) return [];
+	return fs.readdirSync(dir, { withFileTypes: true })
+		.filter((d) => d.isDirectory())
+		.map((d) => d.name)
+		.sort();
 }
 
 /**
  * Resolve user input to a known project name.
- *
- * Tries (in order):
- * 1. Exact match against known project directories
- * 2. Slugified exact match
- * 3. Partial match — known project name starts with the input
- * 4. Partial match — input starts with a known project name
- * 5. projectSlug (strips timestamps/labels) against known projects
- *
- * Returns the matching project name, or the slugified input as fallback.
+ * 1. Exact match  2. Slugified match  3. Unique prefix match  4. Slug fallback
  */
 export function resolveProject(cwd: string, input: string): string {
 	const projects = listWaveProjects(cwd);
 	if (projects.length === 0) return slugify(input);
 
-	// 1. Exact match
 	if (projects.includes(input)) return input;
 
-	// 2. Slugified exact match
 	const slug = slugify(input);
 	if (projects.includes(slug)) return slug;
 
-	// 3. Clean slug (no timestamps/labels)
-	const clean = projectSlug(input);
-	if (projects.includes(clean)) return clean;
+	const matches = projects.filter((p) => p.startsWith(slug));
+	if (matches.length === 1) return matches[0];
 
-	// 4. Partial: project starts with input
-	const startsWith = projects.filter((p) => p.startsWith(slug) || p.startsWith(clean));
-	if (startsWith.length === 1) return startsWith[0];
-
-	// 5. Partial: input starts with project name (user typed too much)
-	const prefixOf = projects.filter((p) => slug.startsWith(p) || clean.startsWith(p));
-	if (prefixOf.length === 1) return prefixOf[0];
-
-	// 6. Substring match
-	const contains = projects.filter((p) => p.includes(clean) || clean.includes(p));
-	if (contains.length === 1) return contains[0];
-
-	return slug; // fallback
-}
-
-function specDir(cwd: string): string {
-	return path.join(cwd, "docs", "spec");
-}
-
-function planDir(cwd: string): string {
-	return path.join(cwd, "docs", "plan");
-}
-
-export function waveProjectDir(cwd: string, name: string): string {
-	// Used only for checking file presence — returns the plan dir for the project
-	return path.join(planDir(cwd), name);
-}
-
-// ── Timestamp helper ───────────────────────────────────────────────
-
-function timestamp(): string {
-	const d = new Date();
-	const pad = (n: number) => String(n).padStart(2, "0");
-	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}`;
-}
-
-// ── Write paths (create new files with descriptive names) ──────────
-
-export function specPath(cwd: string, name: string): string {
-	return path.join(specDir(cwd), name, `${name}-spec-${timestamp()}.md`);
-}
-
-export function planPath(cwd: string, name: string): string {
-	return path.join(planDir(cwd), name, `${name}-plan-${timestamp()}.md`);
-}
-
-export function logFilePath(cwd: string, name: string): string {
-	return path.join(planDir(cwd), name, `${name}-execution-${timestamp()}.md`);
-}
-
-// ── Find paths (locate existing files flexibly) ────────────────────
-
-/**
- * Find any .md file in a directory, preferring the most recent one.
- * Returns null if the directory doesn't exist or has no .md files.
- */
-function findMdInDir(dir: string): string | null {
-	if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return null;
-	const mds = fs.readdirSync(dir)
-		.filter((f) => f.endsWith(".md"))
-		.sort()
-		.reverse(); // latest timestamp sorts last alphabetically → reverse for most recent
-	return mds.length > 0 ? path.join(dir, mds[0]) : null;
+	return slug;
 }
 
 /**
- * Find a spec file flexibly. Checks (in order):
- * 1. Exact file path (absolute or relative to cwd)
- * 2. Any .md in docs/spec/<name>/ (most recent)
- * 3. docs/spec/<name>.md (flat file)
- * 4. Legacy: .pi/waves/<name>/SPEC.md
- *
- * Returns the resolved absolute path, or null if nothing found.
+ * Build a summary of a project's files for display.
  */
-export function findSpecFile(cwd: string, nameOrPath: string): string | null {
-	// 1. Exact path (absolute, or relative to cwd)
-	const asPath = path.resolve(cwd, nameOrPath);
-	if (fs.existsSync(asPath) && fs.statSync(asPath).isFile()) {
-		return asPath;
-	}
+export function projectSummary(cwd: string, name: string): string {
+	const dir = projectDir(cwd, name);
+	const specs = versionedFiles(dir, "spec");
+	const plans = versionedFiles(dir, "plan");
+	const execs = versionedFiles(dir, "execution");
+	const hasState = fs.existsSync(path.join(dir, "state.json"));
 
-	const name = slugify(nameOrPath);
+	const parts: string[] = [];
+	if (specs.length > 0) parts.push(`📄 ${specs.map((s) => s.file).join(", ")}`);
+	if (plans.length > 0) parts.push(`📋 ${plans.map((p) => p.file).join(", ")}`);
+	if (execs.length > 0) parts.push(`📝 ${execs.map((e) => e.file).join(", ")}`);
+	if (hasState) parts.push("⏸ resumable");
 
-	// 2. Any .md in docs/spec/<name>/
-	const fromDir = findMdInDir(path.join(specDir(cwd), name));
-	if (fromDir) return fromDir;
-
-	// 3. Flat file: docs/spec/<name>.md
-	const flat = path.join(specDir(cwd), `${name}.md`);
-	if (fs.existsSync(flat)) return flat;
-
-	// 4. Legacy: .pi/waves/<name>/SPEC.md
-	const legacy = path.join(cwd, ".pi", "waves", name, "SPEC.md");
-	if (fs.existsSync(legacy)) return legacy;
-
-	return null;
-}
-
-/**
- * Find a plan file for a project.
- * Searches docs/plan/<name>/ for the most recent *-plan-*.md file,
- * falling back to any .md, then legacy PLAN.md.
- */
-export function findPlanFile(cwd: string, nameOrPath: string): string | null {
-	const name = slugify(nameOrPath);
-	const dir = path.join(planDir(cwd), name);
-
-	if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
-		const files = fs.readdirSync(dir).filter((f) => f.endsWith(".md"));
-		// Prefer plan files over execution logs
-		const plans = files.filter((f) => f.includes("-plan-")).sort().reverse();
-		if (plans.length > 0) return path.join(dir, plans[0]);
-		// Fall back to any .md that isn't an execution log
-		const nonExec = files.filter((f) => !f.includes("-execution-")).sort().reverse();
-		if (nonExec.length > 0) return path.join(dir, nonExec[0]);
-	}
-
-	// Legacy
-	const legacy = path.join(cwd, ".pi", "waves", name, "PLAN.md");
-	if (fs.existsSync(legacy)) return legacy;
-
-	return null;
-}
-
-export function ensureProjectDir(cwd: string, name: string): void {
-	const sd = path.join(specDir(cwd), name);
-	const pd = path.join(planDir(cwd), name);
-	if (!fs.existsSync(sd)) fs.mkdirSync(sd, { recursive: true });
-	if (!fs.existsSync(pd)) fs.mkdirSync(pd, { recursive: true });
-}
-
-export function listWaveProjects(cwd: string): string[] {
-	const names = new Set<string>();
-	for (const dir of [specDir(cwd), planDir(cwd)]) {
-		if (!fs.existsSync(dir)) continue;
-		for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
-			if (d.isDirectory()) names.add(d.name);
-		}
-	}
-	return [...names].sort();
+	return parts.join("  ");
 }
 
 /**

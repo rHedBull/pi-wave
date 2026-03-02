@@ -1,7 +1,7 @@
 /**
  * Execution state persistence — tracks completed tasks for resume.
  *
- * State file lives alongside the plan file: {plan-file}.state.json
+ * State file lives in the same project directory as the plan: state.json
  * Only tasks with status "done" are skipped on resume.
  * Failed/skipped tasks always re-run.
  */
@@ -12,9 +12,9 @@ import type { ExecutionState } from "./types.js";
 
 // ── State File Path ────────────────────────────────────────────────
 
-/** Derive state file path from plan file path: plan.md → plan.md.state.json */
+/** State file lives alongside the plan file in the project directory. */
 export function stateFilePath(planFile: string): string {
-	return planFile + ".state.json";
+	return path.join(path.dirname(planFile), "state.json");
 }
 
 // ── Read / Write ───────────────────────────────────────────────────
