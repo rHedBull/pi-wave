@@ -592,7 +592,23 @@ function logTaskResult(
 	const suffix = result.timedOut ? " **TIMED OUT**" : "";
 	onLog(`${icon} ${agentEmoji} **${task.id}** [${task.agent}]: ${task.title} (${(result.durationMs / 1000).toFixed(1)}s)${suffix}`);
 	if (result.exitCode !== 0 && result.exitCode !== -1) {
-		onLog(`   Error: ${result.stderr.slice(0, 200)}`);
+		// Log stderr (first few lines)
+		if (result.stderr) {
+			const stderrLines = result.stderr.split("\n").filter((l) => l.trim()).slice(0, 5);
+			for (const line of stderrLines) {
+				onLog(`   ${line.slice(0, 200)}`);
+			}
+		}
+		// Log relevant output lines (errors, failures)
+		const errorLines = result.output.split("\n").filter((l) =>
+			/\bfail|error|exception|assert|missing|POST-CHECK|stall/i.test(l) && l.trim().length > 5,
+		).slice(0, 5);
+		if (errorLines.length > 0) {
+			onLog(`   Output:`);
+			for (const line of errorLines) {
+				onLog(`   ${line.trim().slice(0, 200)}`);
+			}
+		}
 	}
 }
 

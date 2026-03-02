@@ -720,19 +720,13 @@ Do NOT write any files. Just output the outline as your response.`;
 				ctx.ui.setStatus("waves", ctx.ui.theme.fg("accent", `⚡ ${waveLabel}`));
 				logLines.push(`## ${waveLabel}`, "");
 
-				// Progress widget
+				// Progress tracking
 				let completed = 0;
-				const taskStatuses = new Map<string, "pending" | "running" | "done" | "failed" | "skipped">();
-				for (const t of waveTasks) taskStatuses.set(t.id, "pending");
-				const taskStartTimes = new Map<string, number>();
-				const taskFixCycles = new Set<string>();
-				const taskStallRetries = new Set<string>();
+				const tracker = createTaskTracker(waveTasks);
 				let currentPhase: string | null = null;
 				const mergeResults: import("./types.js").MergeResult[] = [];
 
 				const updateWidget = () => {
-					// Use the component factory form to bypass the MAX_WIDGET_LINES (10) truncation
-					// that applies to string arrays. Wave progress needs all lines visible.
 					ctx.ui.setWidget("wave-progress", (_tui, theme) => {
 						const container = new Container();
 
@@ -742,7 +736,7 @@ Do NOT write any files. Just output the outline as your response.`;
 						if (wave.foundation.length > 0) {
 							container.addChild(new Text(theme.fg("dim", "  Foundation:"), 1, 0));
 							for (const t of wave.foundation) {
-								container.addChild(new Text(`    ${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles, taskStallRetries)}`, 1, 0));
+								container.addChild(new Text(`    ${taskLine(ctx, t, tracker)}`, 1, 0));
 							}
 						}
 
@@ -753,7 +747,7 @@ Do NOT write any files. Just output the outline as your response.`;
 							}
 							for (const t of feature.tasks) {
 								const indent = feature.name !== "default" ? "    " : "  ";
-								container.addChild(new Text(`${indent}${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles, taskStallRetries)}`, 1, 0));
+								container.addChild(new Text(`${indent}${taskLine(ctx, t, tracker)}`, 1, 0));
 							}
 						}
 
@@ -778,7 +772,7 @@ Do NOT write any files. Just output the outline as your response.`;
 						if (wave.integration.length > 0) {
 							container.addChild(new Text(theme.fg("dim", "  Integration:"), 1, 0));
 							for (const t of wave.integration) {
-								container.addChild(new Text(`    ${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles, taskStallRetries)}`, 1, 0));
+								container.addChild(new Text(`    ${taskLine(ctx, t, tracker)}`, 1, 0));
 							}
 						}
 
@@ -810,17 +804,32 @@ Do NOT write any files. Just output the outline as your response.`;
 						updateWidget();
 					},
 					onTaskStart: (phase, task) => {
-						taskStatuses.set(task.id, "running");
-						taskStartTimes.set(task.id, Date.now());
+						tracker.statuses.set(task.id, "running");
+						tracker.startTimes.set(task.id, Date.now());
 						updateWidget();
 					},
 					onTaskEnd: (phase, task, result) => {
-						taskStatuses.set(task.id,
+						const status =
 							result.timedOut ? "timeout" :
 							result.exitCode === 0 ? "done" :
-							result.exitCode === -1 ? "skipped" : "failed"
-						);
-						taskFixCycles.delete(task.id);
+							result.exitCode === -1 ? "skipped" : "failed";
+						tracker.statuses.set(task.id, status);
+
+						// Record duration
+						const startTime = tracker.startTimes.get(task.id);
+						if (startTime) tracker.durations.set(task.id, Date.now() - startTime);
+
+						// Record error reason for failed tasks
+						if (result.exitCode !== 0 && result.exitCode !== -1) {
+							tracker.errors.set(task.id, extractBriefError(result));
+						}
+
+						// Record fix cycle outcome if task was in a fix cycle
+						if (tracker.fixCycles.has(task.id)) {
+							tracker.fixCycleResults.set(task.id, result.exitCode === 0);
+							tracker.fixCycles.delete(task.id);
+						}
+
 						completed++;
 						// Persist task state for resume
 						if (result.exitCode === 0) markTaskDone(execState, task.id);
@@ -830,13 +839,13 @@ Do NOT write any files. Just output the outline as your response.`;
 						updateWidget();
 					},
 					onFixCycleStart: (phase, task) => {
-						taskFixCycles.add(task.id);
+						tracker.fixCycles.add(task.id);
 						updateWidget();
 					},
 					onStallRetry: (phase, task, reason) => {
-						taskStallRetries.add(task.id);
-						// Reset start time for the retry attempt
-						taskStartTimes.set(task.id, Date.now());
+						tracker.stallRetries.add(task.id);
+						tracker.stallReasons.set(task.id, reason);
+						tracker.startTimes.set(task.id, Date.now());
 						updateWidget();
 					},
 					onMergeResult: (result) => {
@@ -854,7 +863,7 @@ Do NOT write any files. Just output the outline as your response.`;
 				if (!waveResult.passed) {
 					allPassed = false;
 
-					// Report failures
+					// Report failures with error details
 					const failedTasks = [
 						...waveResult.foundationResults,
 						...waveResult.featureResults.flatMap((f) => f.taskResults),
@@ -862,23 +871,57 @@ Do NOT write any files. Just output the outline as your response.`;
 					].filter((r) => r.exitCode !== 0 && r.exitCode !== -1);
 
 					if (failedTasks.length > 0) {
-						const failMsg = failedTasks.map((t) => `  - ${t.id}: ${t.title}`).join("\n");
+						const failMsg = failedTasks.map((t) => {
+							const err = tracker.errors.get(t.id) || extractBriefError(t);
+							const stallReason = tracker.stallReasons.get(t.id);
+							const fixResult = tracker.fixCycleResults.get(t.id);
+							let detail = `  - **${t.id}**: ${t.title}`;
+							detail += `\n    Error: ${err}`;
+							if (stallReason) detail += `\n    Stall: ${stallReason}`;
+							if (fixResult === false) detail += `\n    Fix cycle: attempted and failed`;
+							if (t.durationMs) detail += `\n    Duration: ${formatElapsed(t.durationMs)}`;
+							return detail;
+						}).join("\n");
 						pi.sendMessage(
 							{
 								customType: "wave-task-failures",
-								content: `❌ **${wave.name}** failed:\n${failMsg}`,
+								content: `❌ **${wave.name}** failed:\n\n${failMsg}`,
 								display: true,
 							},
 							{ triggerTurn: false },
 						);
 					}
 
-					// Report failed features
+					// Report skipped tasks (downstream of failures)
+					const skippedTasks = [
+						...waveResult.foundationResults,
+						...waveResult.featureResults.flatMap((f) => f.taskResults),
+						...waveResult.integrationResults,
+					].filter((r) => r.exitCode === -1);
+
+					if (skippedTasks.length > 0) {
+						const skipMsg = skippedTasks.map((t) => `  - ${t.id}: ${t.title}`).join("\n");
+						pi.sendMessage(
+							{
+								customType: "wave-task-skipped",
+								content: `⏭ **${wave.name}** — ${skippedTasks.length} task(s) skipped (dependency failed):\n${skipMsg}`,
+								display: true,
+							},
+							{ triggerTurn: false },
+						);
+					}
+
+					// Report failed features with per-task breakdown
 					const failedFeatures = waveResult.featureResults.filter((f) => !f.passed);
 					if (failedFeatures.length > 0) {
-						const fMsg = failedFeatures.map((f) =>
-							`  - Feature "${f.name}": ${f.error || "task failures"}`
-						).join("\n");
+						const fMsg = failedFeatures.map((f) => {
+							const failedInFeature = f.taskResults.filter((t) => t.exitCode !== 0 && t.exitCode !== -1);
+							const taskDetails = failedInFeature.map((t) => {
+								const err = tracker.errors.get(t.id) || extractBriefError(t);
+								return `    - ${t.id}: ${err}`;
+							}).join("\n");
+							return `  - Feature "${f.name}":\n${taskDetails || "    (unknown failure)"}`;
+						}).join("\n");
 						pi.sendMessage(
 							{
 								customType: "wave-feature-failures",
@@ -1135,13 +1178,10 @@ Do NOT write any files. Just output the outline as your response.`;
 				logLines.push(`## ${waveLabel}`, "");
 
 				let completed = 0;
-				const taskStatuses = new Map<string, "pending" | "running" | "done" | "failed" | "skipped">();
+				const tracker = createTaskTracker(waveTasks);
 				for (const t of waveTasks) {
-					taskStatuses.set(t.id, skipSet.has(t.id) ? "done" : "pending");
+					if (skipSet.has(t.id)) tracker.statuses.set(t.id, "done");
 				}
-				const taskStartTimes = new Map<string, number>();
-				const taskFixCycles = new Set<string>();
-				const taskStallRetries = new Set<string>();
 				let currentPhase: string | null = null;
 				const mergeResults: import("./types.js").MergeResult[] = [];
 
@@ -1153,7 +1193,7 @@ Do NOT write any files. Just output the outline as your response.`;
 						if (wave.foundation.length > 0) {
 							container.addChild(new Text(theme.fg("dim", "  Foundation:"), 1, 0));
 							for (const t of wave.foundation) {
-								container.addChild(new Text(`    ${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles, taskStallRetries)}`, 1, 0));
+								container.addChild(new Text(`    ${taskLine(ctx, t, tracker)}`, 1, 0));
 							}
 						}
 						for (const feature of wave.features) {
@@ -1162,7 +1202,7 @@ Do NOT write any files. Just output the outline as your response.`;
 							}
 							for (const t of feature.tasks) {
 								const indent = feature.name !== "default" ? "    " : "  ";
-								container.addChild(new Text(`${indent}${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles, taskStallRetries)}`, 1, 0));
+								container.addChild(new Text(`${indent}${taskLine(ctx, t, tracker)}`, 1, 0));
 							}
 						}
 						if (currentPhase === "merge" && mergeResults.length === 0) {
@@ -1178,7 +1218,7 @@ Do NOT write any files. Just output the outline as your response.`;
 						if (wave.integration.length > 0) {
 							container.addChild(new Text(theme.fg("dim", "  Integration:"), 1, 0));
 							for (const t of wave.integration) {
-								container.addChild(new Text(`    ${taskLine(ctx, t, taskStatuses, taskStartTimes, taskFixCycles, taskStallRetries)}`, 1, 0));
+								container.addChild(new Text(`    ${taskLine(ctx, t, tracker)}`, 1, 0));
 							}
 						}
 						const overallDone = totalCompleted + completed;
@@ -1208,17 +1248,29 @@ Do NOT write any files. Just output the outline as your response.`;
 						updateWidget();
 					},
 					onTaskStart: (phase, task) => {
-						taskStatuses.set(task.id, "running");
-						taskStartTimes.set(task.id, Date.now());
+						tracker.statuses.set(task.id, "running");
+						tracker.startTimes.set(task.id, Date.now());
 						updateWidget();
 					},
 					onTaskEnd: (phase, task, result) => {
-						taskStatuses.set(task.id,
+						const status =
 							result.timedOut ? "timeout" :
 							result.exitCode === 0 ? "done" :
-							result.exitCode === -1 ? "skipped" : "failed"
-						);
-						taskFixCycles.delete(task.id);
+							result.exitCode === -1 ? "skipped" : "failed";
+						tracker.statuses.set(task.id, status);
+
+						const startTime = tracker.startTimes.get(task.id);
+						if (startTime) tracker.durations.set(task.id, Date.now() - startTime);
+
+						if (result.exitCode !== 0 && result.exitCode !== -1) {
+							tracker.errors.set(task.id, extractBriefError(result));
+						}
+
+						if (tracker.fixCycles.has(task.id)) {
+							tracker.fixCycleResults.set(task.id, result.exitCode === 0);
+							tracker.fixCycles.delete(task.id);
+						}
+
 						completed++;
 						if (result.exitCode === 0) markTaskDone(execState, task.id);
 						else if (result.exitCode === -1) markTaskSkipped(execState, task.id);
@@ -1227,12 +1279,13 @@ Do NOT write any files. Just output the outline as your response.`;
 						updateWidget();
 					},
 					onFixCycleStart: (phase, task) => {
-						taskFixCycles.add(task.id);
+						tracker.fixCycles.add(task.id);
 						updateWidget();
 					},
 					onStallRetry: (phase, task, reason) => {
-						taskStallRetries.add(task.id);
-						taskStartTimes.set(task.id, Date.now());
+						tracker.stallRetries.add(task.id);
+						tracker.stallReasons.set(task.id, reason);
+						tracker.startTimes.set(task.id, Date.now());
 						updateWidget();
 					},
 					onMergeResult: (result) => {
@@ -1254,8 +1307,14 @@ Do NOT write any files. Just output the outline as your response.`;
 						...waveResult.integrationResults,
 					].filter((r) => r.exitCode !== 0 && r.exitCode !== -1);
 					if (failedTasks.length > 0) {
+						const failMsg = failedTasks.map((t) => {
+							const err = tracker.errors.get(t.id) || extractBriefError(t);
+							let detail = `  - **${t.id}**: ${t.title}`;
+							detail += `\n    Error: ${err}`;
+							return detail;
+						}).join("\n");
 						pi.sendMessage(
-							{ customType: "wave-task-failures", content: `❌ **${wave.name}** failed:\n${failedTasks.map((t) => `  - ${t.id}: ${t.title}`).join("\n")}`, display: true },
+							{ customType: "wave-task-failures", content: `❌ **${wave.name}** failed:\n\n${failMsg}`, display: true },
 							{ triggerTurn: false },
 						);
 					}
@@ -1307,6 +1366,66 @@ Do NOT write any files. Just output the outline as your response.`;
 
 // ── Widget Helpers ─────────────────────────────────────────────────
 
+/** Per-task tracking state for rich progress display. */
+interface TaskTracker {
+	statuses: Map<string, string>;
+	startTimes: Map<string, number>;
+	durations: Map<string, number>;       // elapsed ms for completed tasks
+	errors: Map<string, string>;          // brief error reason for failed tasks
+	stallReasons: Map<string, string>;    // stall detection reason
+	fixCycles: Set<string>;               // tasks currently in fix cycle
+	fixCycleResults: Map<string, boolean>; // fix cycle outcomes (true = succeeded)
+	stallRetries: Set<string>;            // tasks currently retrying after stall
+}
+
+function createTaskTracker(tasks: Task[]): TaskTracker {
+	const statuses = new Map<string, string>();
+	for (const t of tasks) statuses.set(t.id, "pending");
+	return {
+		statuses,
+		startTimes: new Map(),
+		durations: new Map(),
+		errors: new Map(),
+		stallReasons: new Map(),
+		fixCycles: new Set(),
+		fixCycleResults: new Map(),
+		stallRetries: new Set(),
+	};
+}
+
+/**
+ * Extract a brief, human-readable error reason from a task result.
+ * Used for widget display and failure messages. Max ~100 chars.
+ */
+function extractBriefError(result: TaskResult): string {
+	if (result.timedOut) return "timed out";
+
+	// Post-check failure (missing files)
+	const postCheck = result.output.match(/POST-CHECK FAILED:\s*([^\n]+)/);
+	if (postCheck) return postCheck[1].trim().slice(0, 100);
+
+	// Stall
+	const stallMatch = result.stderr.match(/Agent stalled:\s*(.+)/);
+	if (stallMatch) return `stall: ${stallMatch[1].trim().slice(0, 80)}`;
+
+	// First meaningful line of stderr
+	if (result.stderr) {
+		const lines = result.stderr.split("\n").filter((l) => l.trim());
+		// Skip "Task timed out" prefix line
+		const meaningful = lines.find((l) => !l.startsWith("Task timed out"));
+		if (meaningful) return meaningful.trim().slice(0, 100);
+	}
+
+	// Look for failure-related lines in output
+	const outputLines = result.output.split("\n");
+	const failLine = outputLines.find((l) =>
+		/\bfail|error|exception|assert|missing|not found/i.test(l) && l.trim().length > 5,
+	);
+	if (failLine) return failLine.trim().slice(0, 100);
+
+	return "exit code " + result.exitCode;
+}
+
 function statusIcon(ctx: any, status: string): string {
 	switch (status) {
 		case "done": return ctx.ui.theme.fg("success", "✓");
@@ -1332,36 +1451,42 @@ function formatElapsed(ms: number): string {
 	return `${minutes}m ${secs.toString().padStart(2, "0")}s`;
 }
 
-function taskLine(
-	ctx: any,
-	t: Task,
-	statuses: Map<string, string>,
-	startTimes: Map<string, number>,
-	fixCycles: Set<string>,
-	stallRetries: Set<string>,
-): string {
-	const status = statuses.get(t.id) ?? "pending";
-	const isFixing = fixCycles.has(t.id);
-	const isRetrying = stallRetries.has(t.id);
+function taskLine(ctx: any, t: Task, tracker: TaskTracker): string {
+	const status = tracker.statuses.get(t.id) ?? "pending";
+	const isFixing = tracker.fixCycles.has(t.id);
+	const isRetrying = tracker.stallRetries.has(t.id);
 	const effectiveStatus = isRetrying ? "retrying" : isFixing ? "fixing" : status;
 	const icon = statusIcon(ctx, effectiveStatus);
 	const tag = agentTag(t);
 	let line = `${icon} ${tag} ${t.id}: ${t.title}`;
 
-	// Elapsed time for running tasks
+	// Elapsed time — running (live) or completed (final)
 	if (status === "running") {
-		const startTime = startTimes.get(t.id);
+		const startTime = tracker.startTimes.get(t.id);
 		if (startTime) {
-			const elapsed = formatElapsed(Date.now() - startTime);
-			line += ctx.ui.theme.fg("dim", ` (${elapsed})`);
+			line += ctx.ui.theme.fg("dim", ` (${formatElapsed(Date.now() - startTime)})`);
 		}
-		if (isRetrying) {
-			line += ctx.ui.theme.fg("warning", " [stall → retry]");
-		} else if (isFixing) {
-			line += ctx.ui.theme.fg("warning", " [fix cycle]");
-		}
-	} else if (status === "timeout") {
-		line += ctx.ui.theme.fg("error", " [timed out]");
+	} else if (tracker.durations.has(t.id)) {
+		line += ctx.ui.theme.fg("dim", ` (${formatElapsed(tracker.durations.get(t.id)!)})`);
+	}
+
+	// Status annotations
+	if (status === "running" && isRetrying) {
+		const reason = tracker.stallReasons.get(t.id);
+		line += ctx.ui.theme.fg("warning", ` [stall → retry${reason ? ": " + reason.slice(0, 50) : ""}]`);
+	} else if (status === "running" && isFixing) {
+		line += ctx.ui.theme.fg("warning", " [fix cycle]");
+	} else if (status === "failed" || status === "timeout") {
+		const err = tracker.errors.get(t.id);
+		if (err) line += ctx.ui.theme.fg("error", ` — ${err}`);
+		// Show fix cycle outcome if there was one
+		const fixResult = tracker.fixCycleResults.get(t.id);
+		if (fixResult === false) line += ctx.ui.theme.fg("error", " [fix failed]");
+	} else if (status === "done") {
+		const fixResult = tracker.fixCycleResults.get(t.id);
+		if (fixResult === true) line += ctx.ui.theme.fg("success", " [fix succeeded]");
+	} else if (status === "skipped") {
+		line += ctx.ui.theme.fg("muted", " (dep failed)");
 	}
 
 	return line;
