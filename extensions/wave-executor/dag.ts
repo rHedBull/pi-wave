@@ -191,6 +191,192 @@ export function validatePlan(plan: Plan): { valid: boolean; errors: string[] } {
 	return { valid: errors.length === 0, errors };
 }
 
+// ── Comprehensive Plan Validation ──────────────────────────────────
+
+/**
+ * Comprehensive plan validation for use after LLM writes a plan.
+ *
+ * Runs all of validatePlan() plus additional content checks:
+ * - Task ID convention (w{N}-{feat}-t{N})
+ * - Empty/missing descriptions
+ * - Worker/test-writer tasks without files
+ * - Empty sections (waves with no features, features with no tasks)
+ * - Missing Data Schemas section
+ * - Verifier task presence per feature/foundation
+ * - Dangling depends references (typos pointing to non-existent IDs)
+ *
+ * Returns structured result with errors (blocking) and warnings (informational).
+ */
+export function validatePlanComprehensive(plan: Plan): {
+	valid: boolean;
+	errors: string[];
+	warnings: string[];
+	stats: {
+		waves: number;
+		features: number;
+		tasks: number;
+		testTasks: number;
+		workerTasks: number;
+		verifierTasks: number;
+	};
+} {
+	// Start with structural validation
+	const structural = validatePlan(plan);
+	const errors = [...structural.errors];
+	const warnings: string[] = [];
+
+	// Stats
+	let totalFeatures = 0;
+	let totalTasks = 0;
+	let testTasks = 0;
+	let workerTasks = 0;
+	let verifierTasks = 0;
+
+	// Task ID convention regex
+	const taskIdPattern = /^w\d+-[\w]+-t\d+$/;
+
+	// Collect ALL task IDs across entire plan for dangling reference detection
+	const allPlanTaskIds = new Set<string>();
+	for (const wave of plan.waves) {
+		for (const t of wave.foundation) allPlanTaskIds.add(t.id);
+		for (const f of wave.features) {
+			for (const t of f.tasks) allPlanTaskIds.add(t.id);
+		}
+		for (const t of wave.integration) allPlanTaskIds.add(t.id);
+	}
+
+	// Check Data Schemas section
+	if (!plan.dataSchemas || plan.dataSchemas.trim().length === 0) {
+		warnings.push("Plan has no ## Data Schemas section. Parallel agents may use inconsistent names.");
+	}
+
+	// Empty plan
+	if (plan.waves.length === 0) {
+		errors.push("Plan has no waves.");
+		return { valid: false, errors, warnings, stats: { waves: 0, features: 0, tasks: 0, testTasks: 0, workerTasks: 0, verifierTasks: 0 } };
+	}
+
+	// No goal
+	if (!plan.goal || plan.goal.trim().length === 0) {
+		warnings.push("Plan has no ## Goal.");
+	}
+
+	for (let wi = 0; wi < plan.waves.length; wi++) {
+		const wave = plan.waves[wi];
+		const waveLabel = `Wave ${wi + 1} "${wave.name}"`;
+
+		// Empty wave
+		const waveTotalTasks = wave.foundation.length
+			+ wave.features.reduce((s, f) => s + f.tasks.length, 0)
+			+ wave.integration.length;
+		if (waveTotalTasks === 0) {
+			errors.push(`${waveLabel}: has no tasks at all.`);
+			continue;
+		}
+
+		// Features check
+		const realFeatures = wave.features.filter(f => f.name !== "default");
+		totalFeatures += realFeatures.length || wave.features.length;
+
+		if (wave.features.length === 0) {
+			warnings.push(`${waveLabel}: has no features section.`);
+		}
+
+		// Check each task in all sections
+		const checkTask = (task: Task, sectionLabel: string) => {
+			totalTasks++;
+			if (task.agent === "test-writer") testTasks++;
+			else if (task.agent === "wave-verifier") verifierTasks++;
+			else workerTasks++;
+
+			// Task ID convention
+			if (!taskIdPattern.test(task.id)) {
+				warnings.push(`${waveLabel} ${sectionLabel}: Task "${task.id}" doesn't follow convention w{N}-{feat}-t{N}.`);
+			}
+
+			// Valid agent name
+			const validAgents = ["worker", "test-writer", "wave-verifier"];
+			if (!validAgents.includes(task.agent)) {
+				warnings.push(`${waveLabel} ${sectionLabel}: Task "${task.id}" has unknown agent "${task.agent}".`);
+			}
+
+			// Empty description
+			if (!task.description || task.description.trim().length === 0) {
+				errors.push(`${waveLabel} ${sectionLabel}: Task "${task.id}" has no description.`);
+			}
+
+			// Worker/test-writer without files
+			if ((task.agent === "worker" || task.agent === "test-writer") && task.files.length === 0) {
+				errors.push(`${waveLabel} ${sectionLabel}: Task "${task.id}" (${task.agent}) has no files declared.`);
+			}
+
+			// Dangling depends — references an ID that exists in the plan but in a DIFFERENT section
+			// (This is already caught by validatePlan's cross-section check, but we add a
+			//  check for total typos — depends on something that doesn't exist ANYWHERE)
+			for (const dep of task.depends) {
+				if (!allPlanTaskIds.has(dep)) {
+					errors.push(
+						`${waveLabel} ${sectionLabel}: Task "${task.id}" depends on "${dep}" which doesn't exist anywhere in the plan. Likely a typo.`,
+					);
+				}
+			}
+		};
+
+		// Foundation
+		for (const task of wave.foundation) checkTask(task, "foundation");
+
+		// Check foundation has a verifier if it has content tasks
+		const foundationContentTasks = wave.foundation.filter(t => t.agent !== "wave-verifier");
+		const foundationVerifiers = wave.foundation.filter(t => t.agent === "wave-verifier");
+		if (foundationContentTasks.length > 0 && foundationVerifiers.length === 0) {
+			warnings.push(`${waveLabel} foundation: has ${foundationContentTasks.length} content task(s) but no wave-verifier.`);
+		}
+
+		// Features
+		for (const feature of wave.features) {
+			if (feature.name === "default") continue;
+
+			if (feature.tasks.length === 0) {
+				errors.push(`${waveLabel} feature "${feature.name}": has no tasks.`);
+				continue;
+			}
+
+			for (const task of feature.tasks) checkTask(task, `feature "${feature.name}"`);
+
+			// Check feature has a verifier
+			const featureVerifiers = feature.tasks.filter(t => t.agent === "wave-verifier");
+			if (featureVerifiers.length === 0) {
+				warnings.push(`${waveLabel} feature "${feature.name}": has no wave-verifier task.`);
+			}
+		}
+
+		// Integration
+		for (const task of wave.integration) checkTask(task, "integration");
+
+		// Check integration has a verifier if it has content
+		if (wave.integration.length > 0) {
+			const intVerifiers = wave.integration.filter(t => t.agent === "wave-verifier");
+			if (intVerifiers.length === 0) {
+				warnings.push(`${waveLabel} integration: has tasks but no wave-verifier.`);
+			}
+		}
+	}
+
+	return {
+		valid: errors.length === 0,
+		errors,
+		warnings,
+		stats: {
+			waves: plan.waves.length,
+			features: totalFeatures,
+			tasks: totalTasks,
+			testTasks,
+			workerTasks,
+			verifierTasks,
+		},
+	};
+}
+
 // ── Build DAG Levels ───────────────────────────────────────────────
 
 /**

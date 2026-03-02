@@ -15,7 +15,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { validatePlan } from "./dag.js";
+import { Type } from "@sinclair/typebox";
+import { validatePlan, validatePlanComprehensive } from "./dag.js";
 import { runWaveExecution } from "./execution-runner.js";
 import {
 	allVersions,
@@ -56,6 +57,74 @@ const TASK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes per task
 // ── Extension ──────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+
+	// ── validate-plan tool ──────────────────────────────────────────
+
+	pi.registerTool({
+		name: "validate_wave_plan",
+		label: "Validate Wave Plan",
+		description:
+			"Validate a wave plan file for structural errors (bad dependencies, cycles, file overlaps, missing fields). " +
+			"Call this AFTER writing a plan file. Returns errors that must be fixed and warnings to consider. " +
+			"If errors are found, fix them in the plan and call this tool again until validation passes.",
+		parameters: Type.Object({
+			path: Type.String({ description: "Path to the plan file to validate" }),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const planFile = path.resolve(ctx.cwd, params.path);
+
+			if (!fs.existsSync(planFile)) {
+				return {
+					content: [{ type: "text", text: `❌ File not found: ${params.path}` }],
+				};
+			}
+
+			const planContent = fs.readFileSync(planFile, "utf-8");
+			const plan = parsePlanV2(planContent);
+
+			if (plan.waves.length === 0) {
+				return {
+					content: [{ type: "text", text: `❌ Could not parse any waves from ${params.path}. Check the markdown format.` }],
+				};
+			}
+
+			const result = validatePlanComprehensive(plan);
+			const lines: string[] = [];
+
+			// Stats
+			lines.push(`## Plan Stats`);
+			lines.push(`- ${result.stats.waves} waves, ${result.stats.features} features, ${result.stats.tasks} tasks`);
+			lines.push(`- 🧪 ${result.stats.testTasks} test, 🔨 ${result.stats.workerTasks} impl, 🔍 ${result.stats.verifierTasks} verify`);
+			lines.push("");
+
+			// Errors
+			if (result.errors.length > 0) {
+				lines.push(`## ❌ Errors (${result.errors.length}) — MUST FIX`);
+				for (const e of result.errors) lines.push(`- ${e}`);
+				lines.push("");
+			}
+
+			// Warnings
+			if (result.warnings.length > 0) {
+				lines.push(`## ⚠️ Warnings (${result.warnings.length})`);
+				for (const w of result.warnings) lines.push(`- ${w}`);
+				lines.push("");
+			}
+
+			// Verdict
+			if (result.valid) {
+				lines.push("## ✅ Plan is valid");
+				lines.push("All structural checks passed. Ready for `/waves-execute`.");
+			} else {
+				lines.push("## ❌ Plan has errors");
+				lines.push("Fix the errors listed above, rewrite the plan file, and call `validate_wave_plan` again.");
+			}
+
+			return {
+				content: [{ type: "text", text: lines.join("\n") }],
+			};
+		},
+	});
 
 	// ── /waves ───────────────────────────────────────────────────────
 

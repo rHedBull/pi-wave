@@ -245,21 +245,14 @@ Files: list of files this feature owns
 - Target: 2-5 waves, 2-6 features per wave, 2-6 tasks per feature
 - All agents use \`permissionMode: fullAuto\`
 
-**After writing the plan, you MUST validate it before telling the user it's ready:**
+**After writing the plan, you MUST validate it using the \`validate_wave_plan\` tool:**
 
-1. Read the plan file back
-2. For each wave, collect all task IDs per section:
-   - Foundation task IDs (from \`### Foundation\`)
-   - Each feature's task IDs (from \`### Feature: <name>\`)
-   - Integration task IDs (from \`### Integration\`)
-3. For every \`Depends:\` line, verify EACH dependency ID exists in the **same section**:
-   - Foundation tasks can only depend on other foundation tasks
-   - Feature tasks can only depend on tasks in the **same** feature
-   - Integration tasks can only depend on other integration tasks
-   - Cross-section dependencies are INVALID (e.g., integration depending on \`w1-skill-t3\`)
-4. Verify no two parallel features write to the same file
-5. If ANY violations are found, fix them (remove invalid cross-section deps, move files to foundation) and rewrite the plan
+1. Write the plan file
+2. Call \`validate_wave_plan\` with the plan file path
+3. If the tool reports **errors** — fix them in the plan file and call \`validate_wave_plan\` again
+4. Repeat until validation passes (no errors)
+5. Warnings are informational — review them but they don't block execution
 
-Only after validation passes, tell the user: "Next step: \`/waves-execute ${projectName}\`"
+Only after \`validate_wave_plan\` reports "✅ Plan is valid", tell the user: "Next step: \`/waves-execute ${projectName}\`"
 ${version ? `\nIMPORTANT: Include \`<!-- pi-wave v${version} -->\` at the very end of the plan file.` : ""}`;
 }
