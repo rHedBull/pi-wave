@@ -21,6 +21,7 @@ import {
 	extractFinalOutput,
 	extractSpecSections,
 	runSubagent,
+	taskLogFile,
 } from "./helpers.js";
 import type {
 	Feature,
@@ -46,6 +47,8 @@ export interface FeatureExecutorOptions {
 	signal?: AbortSignal;
 	/** Task IDs to skip (already completed in a previous run). */
 	skipTaskIds?: Set<string>;
+	/** Directory for per-task log files. */
+	taskLogDir?: string;
 	onTaskStart?: (task: Task) => void;
 	onTaskEnd?: (task: Task, result: TaskResult) => void;
 	onFixCycleStart?: (task: Task) => void;
@@ -66,6 +69,7 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 		maxConcurrency,
 		signal,
 		skipTaskIds = new Set(),
+		taskLogDir,
 		onTaskStart,
 		onTaskEnd,
 		onFixCycleStart,
@@ -160,7 +164,8 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 					? feature.tasks.filter(t => t.agent !== "wave-verifier").flatMap(t => t.files)
 					: undefined;
 
-				const result = await runSingleTask(task, taskCwd, specContent, dataSchemas, protectedPaths, signal, onStallRetry, featureFiles);
+				const tLogFile = taskLogDir ? taskLogFile(taskLogDir, task.id) : undefined;
+				const result = await runSingleTask(task, taskCwd, specContent, dataSchemas, protectedPaths, signal, onStallRetry, featureFiles, tLogFile);
 				const elapsed = Date.now() - start;
 
 				let taskResult: TaskResult = {
@@ -252,6 +257,8 @@ async function runSingleTask(
 	onStallRetry?: (task: Task, reason: string) => void,
 	/** All files from the feature (for verifier context) */
 	allFeatureFiles?: string[],
+	/** Log file path for this task */
+	logFile?: string,
 ): Promise<Omit<TaskResult, "durationMs">> {
 	const agentName = task.agent || "worker";
 	const specContext = extractSpecSections(specContent, task.specRefs);
@@ -354,7 +361,7 @@ IMPORTANT:
 		};
 	}
 
-	let result = await runSubagent(agentName, agentTask, cwd, signal, fileRules);
+	let result = await runSubagent(agentName, agentTask, cwd, signal, fileRules, undefined, logFile);
 
 	// Stall retry: if agent got stuck in a loop, interrupt and retry with guidance
 	if (result.stall) {
@@ -367,7 +374,8 @@ IMPORTANT:
 			`\nYou MUST take a different approach. Do not repeat the same actions.`,
 			`The previous agent's partial work may already be on disk — check what exists before starting.`,
 		].join("\n");
-		result = await runSubagent(agentName, agentTask + stallContext, cwd, signal, fileRules);
+		// Retry appends to the same log file
+		result = await runSubagent(agentName, agentTask + stallContext, cwd, signal, fileRules, undefined, logFile);
 	}
 
 	const output = extractFinalOutput(result.stdout);

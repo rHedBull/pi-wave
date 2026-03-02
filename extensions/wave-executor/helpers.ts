@@ -342,6 +342,30 @@ export function migrateLooseFiles(cwd: string): string[] {
 	return moved;
 }
 
+// ── Task Log Paths ─────────────────────────────────────────────────
+
+/**
+ * Create the task logs directory for the current execution.
+ * Returns the directory path. Logs dir is cleared on each new execution.
+ */
+export function createTaskLogDir(cwd: string, name: string): string {
+	const dir = path.join(projectDir(cwd, name), "logs");
+	// Clear previous logs
+	if (fs.existsSync(dir)) {
+		for (const f of fs.readdirSync(dir)) {
+			try { fs.unlinkSync(path.join(dir, f)); } catch { /* ignore */ }
+		}
+	} else {
+		fs.mkdirSync(dir, { recursive: true });
+	}
+	return dir;
+}
+
+/** Get the log file path for a task. */
+export function taskLogFile(logDir: string, taskId: string): string {
+	return path.join(logDir, `${taskId}.log`);
+}
+
 // ── Find Paths (locate existing files) ─────────────────────────────
 
 /**
@@ -627,6 +651,7 @@ export function runSubagent(
 	signal?: AbortSignal,
 	fileRules?: FileAccessRules,
 	timeoutMs?: number,
+	logFile?: string,
 ): Promise<SubagentResult> {
 	return new Promise((resolve) => {
 		const args = ["--mode", "json", "-p", "--no-session"];
@@ -667,6 +692,36 @@ export function runSubagent(
 		let resolved = false;
 		let timedOut = false;
 		let stall: StallInfo | undefined;
+
+		// ── Per-task log file ──
+		let logFd: number | null = null;
+		const logStartTime = Date.now();
+		if (logFile) {
+			try {
+				fs.mkdirSync(path.dirname(logFile), { recursive: true });
+				logFd = fs.openSync(logFile, "w");
+				fs.writeSync(logFd, `=== Agent: ${agentName} ===\n`);
+				fs.writeSync(logFd, `Started: ${new Date().toISOString()}\n`);
+				fs.writeSync(logFd, `CWD: ${cwd}\n\n`);
+			} catch { /* best effort */ }
+		}
+
+		function logLine(text: string): void {
+			if (!logFd) return;
+			const elapsed = ((Date.now() - logStartTime) / 1000).toFixed(1);
+			try { fs.writeSync(logFd, `[${elapsed}s] ${text}\n`); } catch { /* ignore */ }
+		}
+
+		function closeLog(exitCode: number): void {
+			if (!logFd) return;
+			try {
+				const elapsed = ((Date.now() - logStartTime) / 1000).toFixed(1);
+				fs.writeSync(logFd, `\nFinished: ${new Date().toISOString()} (${elapsed}s)\n`);
+				fs.writeSync(logFd, `Exit code: ${exitCode}${timedOut ? " (timed out)" : ""}${stall ? " (stalled)" : ""}\n`);
+				fs.closeSync(logFd);
+			} catch { /* ignore */ }
+			logFd = null;
+		}
 
 		// ── Stall detection state ──
 		let consecutiveErrors = 0;
@@ -753,6 +808,41 @@ export function runSubagent(
 				try {
 					const event = JSON.parse(line);
 
+					// ── Log events to per-task file ──
+					if (logFd) {
+						if (event.type === "tool_execution_start") {
+							const argSummary = summarizeArgs(event.args);
+							logLine(`TOOL ${event.toolName}(${argSummary})`);
+						} else if (event.type === "tool_execution_end") {
+							if (event.isError) {
+								const errOutput = (event.output || event.error || "").toString().slice(0, 500);
+								logLine(`ERROR ${errOutput}`);
+							} else {
+								// Log first few lines of tool output for read/bash
+								const output = (event.output || "").toString();
+								if (output && output.length > 0) {
+									const preview = output.split("\n").slice(0, 10).join("\n");
+									if (preview.trim()) {
+										logLine(`OUTPUT (${output.split("\n").length} lines):`);
+										for (const ol of preview.split("\n")) {
+											try { fs.writeSync(logFd!, `       ${ol}\n`); } catch { /* ignore */ }
+										}
+										if (output.split("\n").length > 10) {
+											try { fs.writeSync(logFd!, `       ... (truncated)\n`); } catch { /* ignore */ }
+										}
+									}
+								}
+							}
+						} else if (event.type === "message_end" && event.message?.role === "assistant") {
+							for (const part of event.message.content || []) {
+								if (part.type === "text" && part.text) {
+									const preview = part.text.slice(0, 500);
+									logLine(`AGENT: ${preview}${part.text.length > 500 ? "..." : ""}`);
+								}
+							}
+						}
+					}
+
 					// ── Hanging tool timer ──
 					if (event.type === "tool_execution_start" && event.toolName === "bash") {
 						hangingToolCommand = (event.args?.command ?? event.input?.command ?? "").slice(0, 120);
@@ -806,9 +896,11 @@ export function runSubagent(
 		proc.on("close", (code) => {
 			if (resolved) return;
 			resolved = true;
+			const exitCode = stall ? 125 : timedOut ? 124 : (code ?? 1);
+			closeLog(exitCode);
 			cleanup();
 			resolve({
-				exitCode: stall ? 125 : timedOut ? 124 : (code ?? 1),
+				exitCode,
 				stdout,
 				stderr: timedOut
 					? `Task timed out after ${Math.round((timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS) / 1000)}s\n${stderr}`
@@ -822,6 +914,7 @@ export function runSubagent(
 		proc.on("error", () => {
 			if (resolved) return;
 			resolved = true;
+			closeLog(1);
 			cleanup();
 			resolve({ exitCode: 1, stdout, stderr: stderr || "Failed to spawn pi" });
 		});

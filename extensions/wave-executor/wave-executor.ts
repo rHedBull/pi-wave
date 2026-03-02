@@ -25,6 +25,7 @@ import {
 	extractFinalOutput,
 	extractSpecSections,
 	runSubagent,
+	taskLogFile,
 } from "./helpers.js";
 import type {
 	FeatureResult,
@@ -51,6 +52,8 @@ export interface WaveExecutorOptions {
 	signal?: AbortSignal;
 	/** Task IDs to skip (already completed in a previous run). */
 	skipTaskIds?: Set<string>;
+	/** Directory for per-task log files. Each task gets a <task-id>.log file. */
+	taskLogDir?: string;
 	onProgress?: (update: ProgressUpdate) => void;
 	onTaskStart?: (phase: string, task: Task) => void;
 	onTaskEnd?: (phase: string, task: Task, result: TaskResult) => void;
@@ -73,6 +76,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 		maxConcurrency,
 		signal,
 		skipTaskIds = new Set(),
+		taskLogDir,
 		onProgress,
 		onTaskStart,
 		onTaskEnd,
@@ -140,8 +144,9 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 						? wave.foundation.filter(t => t.agent !== "wave-verifier").flatMap(t => t.files)
 						: undefined;
 
+					const tLogFile = taskLogDir ? taskLogFile(taskLogDir, task.id) : undefined;
 					const result = await runTaskOnBase(task, cwd, specContent, dataSchemas, protectedPaths, signal,
-						(t, reason) => onStallRetry?.("foundation", t, reason), foundationFiles);
+						(t, reason) => onStallRetry?.("foundation", t, reason), foundationFiles, tLogFile);
 					let taskResult: TaskResult = { ...result, durationMs: Date.now() - start };
 
 					// Post-task file existence check for worker/test-writer tasks
@@ -240,6 +245,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 						maxConcurrency: perFeatureConcurrency,
 						signal,
 						skipTaskIds,
+						taskLogDir,
 						onTaskStart: (task) => onTaskStart?.(`feature:${feature.name}`, task),
 						onTaskEnd: (task, tr) => {
 							onTaskEnd?.(`feature:${feature.name}`, task, tr);
@@ -326,8 +332,9 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 						]
 						: undefined;
 
+					const tLogFile = taskLogDir ? taskLogFile(taskLogDir, task.id) : undefined;
 					const result = await runTaskOnBase(task, cwd, specContent, dataSchemas, protectedPaths, signal,
-						(t, reason) => onStallRetry?.("integration", t, reason), allWaveFiles);
+						(t, reason) => onStallRetry?.("integration", t, reason), allWaveFiles, tLogFile);
 					let taskResult: TaskResult = { ...result, durationMs: Date.now() - start };
 
 					// Post-task file existence check for worker/test-writer tasks
@@ -412,6 +419,8 @@ async function runTaskOnBase(
 	onStallRetry?: (task: Task, reason: string) => void,
 	/** All files from the wave (for verifier context) */
 	allWaveFiles?: string[],
+	/** Log file path for this task */
+	logFile?: string,
 ): Promise<Omit<TaskResult, "durationMs">> {
 	const agentName = task.agent || "worker";
 	const specContext = extractSpecSections(specContent, task.specRefs);
@@ -495,7 +504,7 @@ IMPORTANT:
 		};
 	}
 
-	let result = await runSubagent(agentName, agentTask, cwd, signal, fileRules);
+	let result = await runSubagent(agentName, agentTask, cwd, signal, fileRules, undefined, logFile);
 
 	// Stall retry: if agent got stuck in a loop, interrupt and retry with guidance
 	if (result.stall) {
@@ -508,7 +517,8 @@ IMPORTANT:
 			`\nYou MUST take a different approach. Do not repeat the same actions.`,
 			`The previous agent's partial work may already be on disk — check what exists before starting.`,
 		].join("\n");
-		result = await runSubagent(agentName, agentTask + stallContext, cwd, signal, fileRules);
+		// Retry appends to the same log file
+		result = await runSubagent(agentName, agentTask + stallContext, cwd, signal, fileRules, undefined, logFile);
 	}
 
 	const output = extractFinalOutput(result.stdout);

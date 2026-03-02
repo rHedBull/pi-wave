@@ -31,6 +31,7 @@ import {
 } from "./state.js";
 import {
 	allVersions,
+	createTaskLogDir,
 	ensureProjectDir,
 	extractFinalOutput,
 	extractSpecRef,
@@ -703,6 +704,9 @@ Do NOT write any files. Just output the outline as your response.`;
 			// Protected paths — don't let agents modify the spec or plan during execution
 			const protectedPaths = [planFile, ...(spec ? [spec] : [])];
 
+			// Per-task log directory
+			const taskLogDir = createTaskLogDir(ctx.cwd, projectName);
+
 			// Execution state for resume capability
 			const execState = createInitialState(planFile);
 			writeState(planFile, execState);
@@ -799,6 +803,7 @@ Do NOT write any files. Just output the outline as your response.`;
 					cwd: ctx.cwd,
 					maxConcurrency: MAX_CONCURRENCY,
 					signal: controller.signal,
+					taskLogDir,
 					onProgress: (update) => {
 						currentPhase = update.phase;
 						updateWidget();
@@ -992,6 +997,7 @@ Do NOT write any files. Just output the outline as your response.`;
 				finalSummary += `\nRun \`/waves-continue\` to retry after fixing issues.`;
 			}
 			finalSummary += `\n📄 Execution log: \`${path.relative(ctx.cwd, logPath)}\``;
+			finalSummary += `\n📂 Task logs: \`${path.relative(ctx.cwd, taskLogDir)}/\``;
 
 			pi.sendMessage(
 				{ customType: "wave-complete", content: finalSummary, display: true },
@@ -1154,6 +1160,9 @@ Do NOT write any files. Just output the outline as your response.`;
 
 			const protectedPaths = [planFile, ...(spec ? [spec] : [])];
 
+			// Per-task log directory
+			const taskLogDir = createTaskLogDir(ctx.cwd, projectName);
+
 			// Reuse the previous state (with completed task tracking)
 			const execState = prevState;
 
@@ -1243,6 +1252,7 @@ Do NOT write any files. Just output the outline as your response.`;
 					maxConcurrency: MAX_CONCURRENCY,
 					signal: controller.signal,
 					skipTaskIds: currentSkipSet,
+					taskLogDir,
 					onProgress: (update) => {
 						currentPhase = update.phase;
 						updateWidget();
@@ -1349,6 +1359,7 @@ Do NOT write any files. Just output the outline as your response.`;
 				finalSummary += `\nRun \`/waves-continue ${args.trim()}\` again after fixing issues.`;
 			}
 			finalSummary += `\n📄 Log: \`${path.relative(ctx.cwd, logPath)}\``;
+			finalSummary += `\n📂 Task logs: \`${path.relative(ctx.cwd, taskLogDir)}/\``;
 
 			pi.sendMessage(
 				{ customType: "wave-complete", content: finalSummary, display: true },
