@@ -551,6 +551,11 @@ export default function (pi) {
 				return { block: true, reason: "BLOCKED: Destructive bash command not allowed for this agent: " + cmd };
 			}
 		}
+
+		// Block subagent calls — workers must not escalate permissions
+		if (toolName === "subagent") {
+			return { block: true, reason: "BLOCKED: subagent calls are not allowed in wave tasks. If you are blocked on an environment issue, report it and move on — the executor will handle it." };
+		}
 	});
 }
 `;
@@ -638,6 +643,8 @@ export interface SubagentResult {
 	stderr: string;
 	timedOut?: boolean;
 	stall?: StallInfo;
+	/** Infrastructure errors detected in tool output (connection refused, etc.) */
+	infraErrors?: string[];
 }
 
 /**
@@ -747,8 +754,10 @@ export function runSubagent(
 		// ── Stall detection state ──
 		let consecutiveErrors = 0;
 		let softInterruptSent = false;
+		let doctorInvoked = false;
 		const callCounts = new Map<string, number>();
 		const recentActivity: string[] = [];
+		const recentErrors: string[] = [];
 
 		function summarizeArgs(toolArgs: any): string {
 			if (!toolArgs) return "";
@@ -888,6 +897,13 @@ export function runSubagent(
 						hangingToolCommand = undefined;
 					}
 
+					// ── Infrastructure error collection ──
+					if (event.type === "tool_execution_end" && event.isError) {
+						const errText = (event.output || event.error || "").toString().toLowerCase();
+						recentErrors.push(errText.slice(0, 500));
+						if (recentErrors.length > 10) recentErrors.shift();
+					}
+
 					// ── Pattern-based stall detection ──
 					const stallResult = checkStall(event);
 					if (stallResult && !timedOut) {
@@ -914,6 +930,20 @@ export function runSubagent(
 			stderr += data.toString();
 		});
 
+		// Detect infrastructure errors in collected error output
+		const INFRA_PATTERNS = [
+			/connection refused/i,
+			/could not connect to server/i,
+			/no such host/i,
+			/password authentication failed/i,
+			/database .* does not exist/i,
+			/role .* does not exist/i,
+		];
+		function getInfraErrors(): string[] | undefined {
+			const matched = recentErrors.filter(e => INFRA_PATTERNS.some(p => p.test(e)));
+			return matched.length >= 2 ? matched : undefined;
+		}
+
 		proc.on("close", (code) => {
 			if (resolved) return;
 			resolved = true;
@@ -923,6 +953,7 @@ export function runSubagent(
 			resolve({
 				exitCode,
 				stdout,
+				infraErrors: getInfraErrors(),
 				stderr: timedOut
 					? `Task timed out after ${Math.round((timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS) / 1000)}s\n${stderr}`
 					: stall

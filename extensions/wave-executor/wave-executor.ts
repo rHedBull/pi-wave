@@ -509,7 +509,10 @@ IMPORTANT:
 	} else {
 		const blocked = task.testFiles || [];
 		fileRules = {
-			allowWrite: task.files.filter((f) => !blocked.some((b) => f === b)),
+			allowWrite: [
+				...task.files.filter((f) => !blocked.some((b) => f === b)),
+				".env.test",
+			],
 			protectedPaths,
 		};
 	}
@@ -530,6 +533,25 @@ IMPORTANT:
 		].join("\n");
 		// Retry appends to the same log file
 		result = await runSubagent(agentName, agentTask + stallContext, cwd, signal, fileRules, undefined, logFile, [`${logCtx[0]} (stall retry)`, ...logCtx.slice(1)]);
+	}
+
+	// Doctor retry: if worker hit infrastructure errors, invoke doctor then retry
+	if (result.exitCode !== 0 && result.infraErrors && result.infraErrors.length > 0) {
+		const problemDesc = result.infraErrors.slice(-3).join("\n");
+		const doctorResult = await runSubagent(
+			"wave-doctor",
+			`Fix this infrastructure problem in ${cwd}:\n${problemDesc}`,
+			cwd, signal, undefined, 120_000,
+		);
+		if (doctorResult.exitCode === 0) {
+			const fix = extractFinalOutput(doctorResult.stdout) || "Environment fixed.";
+			const doctorContext = [
+				`\n\n✅ ENVIRONMENT FIXED: A doctor agent resolved infrastructure issues:`,
+				fix,
+				`\nYour previous code is already on disk. Just verify it works — run the tests.`,
+			].join("\n");
+			result = await runSubagent(agentName, agentTask + doctorContext, cwd, signal, fileRules, undefined, logFile, [`${logCtx[0]} (doctor retry)`, ...logCtx.slice(1)]);
+		}
 	}
 
 	const output = extractFinalOutput(result.stdout);
