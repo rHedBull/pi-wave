@@ -63,6 +63,32 @@ export async function runWaveExecution(cfg: RunConfig): Promise<void> {
 	let allPassed = true;
 	let totalCompleted = 0;
 	const resumeTag = isResume ? " (resumed)" : "";
+	const execStartTime = Date.now();
+
+	/** Format elapsed time since execution start as [MM:SS]. */
+	function elapsed(): string {
+		const s = Math.floor((Date.now() - execStartTime) / 1000);
+		const m = Math.floor(s / 60);
+		const sec = s % 60;
+		return `[${m.toString().padStart(2, "0")}:${sec.toString().padStart(2, "0")}]`;
+	}
+
+	/** Log a line with elapsed timestamp. */
+	function log(line: string): void {
+		const trimmed = line.replace(/^\n+/, "");
+		const leadingBlanks = line.length - line.replace(/^\n+/, "").length;
+
+		// Add blank lines for leading \n
+		for (let i = 0; i < leadingBlanks; i++) logLines.push("");
+
+		if (trimmed === "" || trimmed === "---") {
+			logLines.push(trimmed);
+		} else if (trimmed.startsWith("#")) {
+			logLines.push("", `${elapsed()} ${trimmed}`);
+		} else {
+			logLines.push(`${elapsed()} ${trimmed}`);
+		}
+	}
 
 	const writeLog = () => {
 		fs.mkdirSync(path.dirname(logPath), { recursive: true });
@@ -82,7 +108,7 @@ export async function runWaveExecution(cfg: RunConfig): Promise<void> {
 
 		advanceToWave(execState, wi);
 		ctx.ui.setStatus("waves", ctx.ui.theme.fg("accent", `⚡ ${waveLabel}${resumeTag}`));
-		logLines.push(`## ${waveLabel}`, "");
+		log(`## ${waveLabel}`);
 
 		// Progress tracking
 		let completed = 0;
@@ -229,7 +255,7 @@ export async function runWaveExecution(cfg: RunConfig): Promise<void> {
 				mergeResults.push(result);
 				updateWidget();
 			},
-			onLog: (line) => logLines.push(line),
+			onLog: (line) => log(line),
 		});
 
 		clearInterval(refreshTimer);
@@ -263,9 +289,12 @@ export async function runWaveExecution(cfg: RunConfig): Promise<void> {
 
 	ctx.ui.setWidget("wave-progress", undefined);
 
-	logLines.push("---", "", `Finished: ${new Date().toISOString()}`);
+	logLines.push("");
+	log("---");
+	log(`Finished: ${new Date().toISOString()}`);
+	const totalElapsed = formatElapsed(Date.now() - execStartTime);
 	const stoppedEarly = !allPassed && waveResults.length < plan.waves.length - startWave;
-	logLines.push(`Result: ${allPassed ? "SUCCESS" : stoppedEarly ? "STOPPED — wave failed" : "COMPLETED WITH ISSUES"}`);
+	log(`Result: ${allPassed ? "SUCCESS" : stoppedEarly ? "STOPPED — wave failed" : "COMPLETED WITH ISSUES"} (${totalElapsed})`);
 	writeLog();
 
 	if (allPassed) deleteState(planFile);
