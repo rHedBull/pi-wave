@@ -8,34 +8,21 @@
  *   /waves-execute        — Reads SPEC.md + PLAN.md → wave-executes with verification
  *   /waves-continue       — Resume a failed execution from where it left off
  *
- * Files are written to docs/spec/ and docs/plan/ in the project directory
- * so you can review, edit, and version control them before executing.
+ * Files live in .pi/waves/<project>/ with versioned names:
+ *   spec-v1.md, plan-v1.md, execution-v1.md, logs-v1/, state.json
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Container, Text } from "@mariozechner/pi-tui";
-import { validateDAG, validatePlan } from "./dag.js";
-import {
-	advanceToWave,
-	completedTaskIds,
-	createInitialState,
-	deleteState,
-	markTaskDone,
-	markTaskFailed,
-	markTaskSkipped,
-	readState,
-	stateFilePath,
-	writeState,
-} from "./state.js";
+import { validatePlan } from "./dag.js";
+import { runWaveExecution } from "./execution-runner.js";
 import {
 	allVersions,
 	createTaskLogDir,
 	ensureProjectDir,
 	extractFinalOutput,
 	extractSpecRef,
-	extractSpecSections,
 	findPlanFile,
 	findSpecFile,
 	listWaveProjects,
@@ -48,11 +35,17 @@ import {
 	runSubagent,
 	slugify,
 	specPath,
-	versionedFiles,
 } from "./helpers.js";
 import { parsePlanV2 } from "./plan-parser.js";
-import type { Plan, Task, TaskResult } from "./types.js";
-import { executeWave } from "./wave-executor.js";
+import { buildBrainstormPrompt, buildPlanReviewPrompt, parseSpecArgs } from "./prompts.js";
+import {
+	completedTaskIds,
+	createInitialState,
+	readState,
+	stateFilePath,
+	writeState,
+} from "./state.js";
+import type { Plan } from "./types.js";
 
 // ── Config ─────────────────────────────────────────────────────────
 
@@ -98,147 +91,6 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ── /waves-spec ─────────────────────────────────────────────────
-
-	const SCOPES = ["hack", "standard", "enterprise"] as const;
-	type Scope = (typeof SCOPES)[number];
-
-	function parseSpecArgs(args: string): { scope: Scope; query: string } | null {
-		const trimmed = args.trim();
-		if (!trimmed) return null;
-		const firstWord = trimmed.split(/\s+/)[0].toLowerCase();
-		if (SCOPES.includes(firstWord as Scope)) {
-			const query = trimmed.slice(firstWord.length).trim();
-			return query ? { scope: firstWord as Scope, query } : null;
-		}
-		return { scope: "standard", query: trimmed };
-	}
-
-	function buildBrainstormPrompt(scope: Scope, query: string, projectName: string, scoutContext: string, specFilePath: string): string {
-		const scopeLabel = scope === "hack" ? "quick hack" : scope === "enterprise" ? "enterprise-grade" : "standard";
-
-		const scopeGuidance = scope === "hack"
-			? `This is a **quick hack** — keep brainstorming brief. 1-2 clarifying questions max, then propose the simplest approach and write a short spec (under 50 lines).
-
-**Topics to cover** (briefly — skip any that are obvious from context):
-- [ ] Approach: quickest path vs slightly cleaner
-- [ ] Where to make the change (which files)
-- [ ] What "done" looks like`
-			: scope === "enterprise"
-			? `This is **enterprise-grade** work. Be thorough in your exploration. Ask as many questions as needed across multiple rounds.
-
-**Topics you MUST cover** — ask about each one if the user hasn't addressed it yet. Check them off mentally as you go. Before writing the spec, review this list and ask about any uncovered topics.
-
-- [ ] **Problem & goal**: What problem does this solve? What's the desired outcome?
-- [ ] **Users/consumers**: Who uses this? (end users, developers, internal systems)
-- [ ] **Integration strategy**: Extend existing code, new module, replace, adapter, or greenfield?
-- [ ] **Integration points**: Which specific files/functions/interfaces does new code hook into?
-- [ ] **Legacy & compatibility**: Must preserve existing behavior? Deprecation path? Migration?
-- [ ] **Legacy cleanup**: Clean up adjacent code or leave untouched?
-- [ ] **Scale & performance**: Expected load? Latency requirements? Caching needs?
-- [ ] **Constraints**: Backward compatibility, deadlines, dependency versions?
-- [ ] **Security**: Auth changes, input validation, data exposure, rate limiting?
-- [ ] **Error handling**: Error taxonomy, response format, recovery behavior, edge cases?
-- [ ] **API versioning**: Versioning strategy, breaking vs non-breaking changes?
-- [ ] **Testing strategy**: TDD? Unit + integration + E2E? Match existing patterns?
-- [ ] **Logging & monitoring**: Log levels, structured logging, health checks, metrics, alerting?
-- [ ] **CI/CD & deployment**: Pipeline changes, feature flags, rollback, migration?
-- [ ] **Documentation**: API docs, ADRs, runbooks, README updates?
-- [ ] **Scalability plan**: Horizontal scaling, stateless design, bottlenecks?`
-			: `This is **standard** scope. Balance thoroughness with pragmatism. 3-6 clarifying questions across a few rounds.
-
-**Topics you MUST cover** — ask about each one if the user hasn't addressed it yet. Before writing the spec, review this list and ask about any uncovered topics.
-
-- [ ] **Goal**: What are we building and why?
-- [ ] **Scope**: Minimal change, moderate (include related cleanups), or thorough (tests, docs, related code)?
-- [ ] **Approach**: Propose 2-3 options with trade-offs
-- [ ] **Patterns & conventions**: Follow existing codebase patterns or specific preferences?
-- [ ] **Testing**: Match existing test patterns, comprehensive, minimal, or none?
-- [ ] **Error handling**: How should errors be handled? Match existing patterns?
-- [ ] **Affected files**: Which files need changes?`;
-
-		return `# Brainstorming: ${query}
-
-You are brainstorming a ${scopeLabel} feature with the user. A scout has already explored the codebase. Your job is to have a **natural, collaborative conversation** to fully understand what needs to be built before writing the spec.
-
-## Scout Findings
-
-${scoutContext}
-
-## Your Process
-
-${scopeGuidance}
-
-**How to brainstorm:**
-1. **Present the scout findings** — summarize what you found in the codebase relevant to this task
-2. **Ask clarifying questions ONE AT A TIME** — don't overwhelm with multiple questions. Prefer offering 2-3 concrete options when possible, but open-ended is fine too
-3. **Propose 2-3 approaches** with trade-offs and your recommendation — explain WHY you recommend one
-4. **Iterate** — go back and forth until the design is clear. Be ready to revise based on feedback
-5. **Before offering to write the spec**, review the topics checklist above. If any topic hasn't been discussed and is relevant, ask about it now.
-6. **When all topics are covered and the user approves**, write the spec to \`${specFilePath}\`
-
-**IMPORTANT RULES:**
-- Do NOT write any implementation code. Only explore, discuss, and ultimately write the spec.
-- Do NOT write the spec until the user has approved the approach. Ask "Ready for me to write the spec?" or similar.
-- Ask ONE question per message. If a topic needs more exploration, break it into multiple messages.
-- If the user's answer covers multiple topics at once, acknowledge that and move on — don't re-ask about things already answered.
-- If a topic from the checklist is clearly not relevant (e.g., API versioning for an internal refactor), briefly note you're skipping it and why.
-- When you DO write the spec, save it to \`${specFilePath}\` using the write tool.
-- After writing the spec, tell the user: "Next step: \`/waves-plan ${projectName}\` to create the implementation plan."
-
-## Spec Format (when ready to write)
-
-${scope === "hack" ? `\`\`\`markdown
-# Spec: <Title>
-
-## What
-2-3 sentences. What we're building.
-
-## Where
-- \`path/to/file.ts\` — what changes
-
-## How
-Brief approach. 5-10 lines max.
-
-## Done When
-Bullet list of what "working" looks like.
-\`\`\`` : scope === "enterprise" ? `Write a comprehensive spec (200-500+ lines) covering:
-- Overview, Current State, User Decisions
-- Functional Requirements (20-50+), Non-Functional Requirements (10-20)
-- Affected Files, API/Interface Changes, Data Model Changes
-- Integration Strategy (integration points, approach, legacy considerations, dependency map)
-- Error Handling Strategy (taxonomy, edge cases, error scenarios)
-- Security, API Versioning, Logging & Monitoring
-- CI/CD & Deployment, Documentation Plan, Scalability Plan
-- Testing Criteria (unit, integration, E2E, edge case, performance)
-- Migration Plan, Out of Scope, Open Questions` : `\`\`\`markdown
-# Spec: <Title>
-
-## Overview
-3-5 sentences on what this feature does.
-
-## Current State
-Key files, how things work now.
-
-## Requirements
-1. FR-1: ...
-(10-20 requirements)
-
-## Affected Files
-- \`path/to/file.ts\` — what changes
-
-## API / Interface Changes
-New or changed APIs, types, signatures.
-
-## Testing Criteria
-- Test that X works when Y
-(5-15 test criteria)
-
-## Out of Scope
-What we're explicitly NOT doing.
-\`\`\``}
-
-Now, start by presenting the scout findings and asking your first question.`;
-	}
 
 	pi.registerCommand("waves-spec", {
 		description: "Brainstorm and create a spec: /waves-spec [hack|standard|enterprise] <task>",
@@ -304,103 +156,6 @@ Now, start by presenting the scout findings and asking your first question.`;
 	});
 
 	// ── /waves-plan ──────────────────────────────────────────────────
-
-	function buildPlanReviewPrompt(projectName: string, relSpec: string, relPlan: string, outlineOutput: string, extraInstructions: string): string {
-		return `# Plan Review: ${projectName}
-
-A planner agent has drafted an outline for the implementation plan. Your job is to **present it to the user for review**, focusing on:
-
-1. **Wave milestones** — what each wave delivers and whether the increments make sense
-2. **Feature parallelization** — which features run in parallel within each wave, and whether the grouping is right
-
-## Planner's Outline
-
-${outlineOutput}
-
-## Your Process
-
-1. **Present the outline clearly** — summarize the milestones and parallelization in a readable format. Highlight the key decisions.
-2. **Ask for feedback** — "Does this look right? Would you change the milestones, move features between waves, or group things differently?"
-3. **Iterate** — if the user has critiques, adjust the outline and present the updated version. Go back and forth until they're satisfied.
-4. **When approved** — read the spec at \`${relSpec}\` and write the full detailed implementation plan to \`${relPlan}\`.
-
-${extraInstructions ? `\n**Additional instructions from the user:** ${extraInstructions}\n` : ""}
-
-## Plan Format (when writing the final plan)
-
-The plan must follow this exact Markdown structure:
-
-\`\`\`markdown
-# Implementation Plan
-
-## Goal
-One sentence.
-
-## Reference
-- Spec: \`${relSpec}\`
-
-## TDD Approach
-Brief: framework, patterns, directory structure.
-
----
-
-## Wave 1: <Milestone Name>
-Working state: <what "done" means>
-
-### Foundation
-Shared contracts committed before features branch.
-
-#### Task w1-found-t1: <title>
-- **Agent**: worker | test-writer | wave-verifier
-- **Files**: \`path/to/file\`
-- **Depends**: (task IDs, or omit if none)
-- **Tests**: \`path/to/test\` (for worker tasks)
-- **Spec refs**: FR-1, FR-2
-- **Description**: Detailed description with code hints (exact signatures, field names).
-
-### Feature: <name>
-Files: list of files this feature owns
-
-#### Task w1-<feature>-t1: <title>
-- **Agent**: ...
-- **Files**: ...
-- **Depends**: w1-<feature>-tN (within same feature only)
-- **Description**: ...
-
-### Integration
-
-#### Task w1-int-t1: <title>
-...
-\`\`\`
-
-**Task ID convention:** \`w{wave}-{feature}-t{num}\` (e.g., w1-auth-t1, w1-found-t2, w2-int-t1)
-
-**Rules:**
-- Features within a wave MUST NOT depend on each other or write to the same files
-- Task dependencies are within the same feature/section only
-- Every task description must repeat canonical field names and signatures (parallel agents can't see each other)
-- Foundation defines exact interfaces — agents just create the files
-- Integration wires features together and runs full verification
-- Target: 2-5 waves, 2-6 features per wave, 2-6 tasks per feature
-- All agents use \`permissionMode: fullAuto\`
-
-**After writing the plan, you MUST validate it before telling the user it's ready:**
-
-1. Read the plan file back
-2. For each wave, collect all task IDs per section:
-   - Foundation task IDs (from \`### Foundation\`)
-   - Each feature's task IDs (from \`### Feature: <name>\`)
-   - Integration task IDs (from \`### Integration\`)
-3. For every \`Depends:\` line, verify EACH dependency ID exists in the **same section**:
-   - Foundation tasks can only depend on other foundation tasks
-   - Feature tasks can only depend on tasks in the **same** feature
-   - Integration tasks can only depend on other integration tasks
-   - Cross-section dependencies are INVALID (e.g., integration depending on \`w1-skill-t3\`)
-4. Verify no two parallel features write to the same file
-5. If ANY violations are found, fix them (remove invalid cross-section deps, move files to foundation) and rewrite the plan
-
-Only after validation passes, tell the user: "Next step: \`/waves-execute ${projectName}\`"`;
-	}
 
 	pi.registerCommand("waves-plan", {
 		description: "Create a plan for a wave project (e.g. /waves-plan my-project)",
@@ -678,12 +433,7 @@ Do NOT write any files. Just output the outline as your response.`;
 				return;
 			}
 
-			const controller = new AbortController();
-			const waveResults: import("./types.js").WaveResult[] = [];
-			let allPassed = true;
-			let totalCompleted = 0;
-
-			// Execution log
+			// Build execution log header
 			const logPath = logFilePath(ctx.cwd, projectName);
 			const relPlanFile = path.relative(ctx.cwd, planFile);
 			const relSpecFile = spec ? path.relative(ctx.cwd, spec) : "(none)";
@@ -696,319 +446,22 @@ Do NOT write any files. Just output the outline as your response.`;
 				`Architecture: feature-parallel DAG`,
 				``,
 			];
-			const writeLog = () => {
-				fs.mkdirSync(path.dirname(logPath), { recursive: true });
-				fs.writeFileSync(logPath, logLines.join("\n"), "utf-8");
-			};
 
-			// Protected paths — don't let agents modify the spec or plan during execution
-			const protectedPaths = [planFile, ...(spec ? [spec] : [])];
-
-			// Per-task log directory (tied to execution version: execution-v3.md → logs-v3/)
-			const taskLogDir = createTaskLogDir(logPath);
-
-			// Execution state for resume capability
 			const execState = createInitialState(planFile);
 			writeState(planFile, execState);
 
-			for (let wi = 0; wi < plan.waves.length; wi++) {
-				advanceToWave(execState, wi);
-				const wave = plan.waves[wi];
-				const waveLabel = `Wave ${wi + 1}/${plan.waves.length}: ${wave.name}`;
-				const waveTasks = [
-					...wave.foundation,
-					...wave.features.flatMap((f) => f.tasks),
-					...wave.integration,
-				];
-
-				ctx.ui.setStatus("waves", ctx.ui.theme.fg("accent", `⚡ ${waveLabel}`));
-				logLines.push(`## ${waveLabel}`, "");
-
-				// Progress tracking
-				let completed = 0;
-				const tracker = createTaskTracker(waveTasks);
-				let currentPhase: string | null = null;
-				const mergeResults: import("./types.js").MergeResult[] = [];
-
-				const updateWidget = () => {
-					ctx.ui.setWidget("wave-progress", (_tui, theme) => {
-						const container = new Container();
-
-						container.addChild(new Text(theme.fg("accent", `⚡ ${waveLabel} — ${completed}/${waveTasks.length} done`), 1, 0));
-
-						// Foundation tasks
-						if (wave.foundation.length > 0) {
-							container.addChild(new Text(theme.fg("dim", "  Foundation:"), 1, 0));
-							for (const t of wave.foundation) {
-								container.addChild(new Text(`    ${taskLine(ctx, t, tracker)}`, 1, 0));
-							}
-						}
-
-						// Feature tasks
-						for (const feature of wave.features) {
-							if (feature.name !== "default") {
-								container.addChild(new Text(theme.fg("dim", `  Feature: ${feature.name}`), 1, 0));
-							}
-							for (const t of feature.tasks) {
-								const indent = feature.name !== "default" ? "    " : "  ";
-								container.addChild(new Text(`${indent}${taskLine(ctx, t, tracker)}`, 1, 0));
-							}
-						}
-
-						// Merge phase
-						if (currentPhase === "merge" && mergeResults.length === 0) {
-							container.addChild(new Text(theme.fg("dim", "  Merge:"), 1, 0));
-							container.addChild(new Text(`    ${theme.fg("warning", "⏳")} Merging feature branches...`, 1, 0));
-						} else if (mergeResults.length > 0) {
-							container.addChild(new Text(theme.fg("dim", "  Merge:"), 1, 0));
-							for (const mr of mergeResults) {
-								const icon = mr.success
-									? (mr.hadChanges ? theme.fg("success", "✓") : theme.fg("muted", "⏭"))
-									: theme.fg("error", "✗");
-								const label = mr.hadChanges
-									? `${mr.source} → ${mr.target}`
-									: `${mr.source} (no changes)`;
-								container.addChild(new Text(`    ${icon} ${label}`, 1, 0));
-							}
-						}
-
-						// Integration tasks
-						if (wave.integration.length > 0) {
-							container.addChild(new Text(theme.fg("dim", "  Integration:"), 1, 0));
-							for (const t of wave.integration) {
-								container.addChild(new Text(`    ${taskLine(ctx, t, tracker)}`, 1, 0));
-							}
-						}
-
-						const overallDone = totalCompleted + completed;
-						container.addChild(new Text("", 0, 0));
-						container.addChild(new Text(theme.fg("dim", `Overall: ${overallDone}/${totalTasks} tasks`), 1, 0));
-
-						return container;
-					});
-				};
-
-				updateWidget();
-
-				// Refresh timer to keep elapsed times updating
-				const refreshTimer = setInterval(updateWidget, 2000);
-
-				// Execute the wave
-				const waveResult = await executeWave({
-					wave,
-					waveNum: wi + 1,
-					specContent,
-					dataSchemas: plan.dataSchemas,
-					protectedPaths,
-					cwd: ctx.cwd,
-					maxConcurrency: MAX_CONCURRENCY,
-					signal: controller.signal,
-					taskLogDir,
-					onProgress: (update) => {
-						currentPhase = update.phase;
-						updateWidget();
-					},
-					onTaskStart: (phase, task) => {
-						tracker.statuses.set(task.id, "running");
-						tracker.startTimes.set(task.id, Date.now());
-						updateWidget();
-					},
-					onTaskEnd: (phase, task, result) => {
-						const status =
-							result.timedOut ? "timeout" :
-							result.exitCode === 0 ? "done" :
-							result.exitCode === -1 ? "skipped" : "failed";
-						tracker.statuses.set(task.id, status);
-
-						// Record duration
-						const startTime = tracker.startTimes.get(task.id);
-						if (startTime) tracker.durations.set(task.id, Date.now() - startTime);
-
-						// Record error reason for failed tasks
-						if (result.exitCode !== 0 && result.exitCode !== -1) {
-							tracker.errors.set(task.id, extractBriefError(result));
-						}
-
-						// Record fix cycle outcome if task was in a fix cycle
-						if (tracker.fixCycles.has(task.id)) {
-							tracker.fixCycleResults.set(task.id, result.exitCode === 0);
-							tracker.fixCycles.delete(task.id);
-						}
-
-						completed++;
-						// Persist task state for resume
-						if (result.exitCode === 0) markTaskDone(execState, task.id);
-						else if (result.exitCode === -1) markTaskSkipped(execState, task.id);
-						else markTaskFailed(execState, task.id);
-						writeState(planFile, execState);
-						updateWidget();
-					},
-					onFixCycleStart: (phase, task) => {
-						tracker.fixCycles.add(task.id);
-						updateWidget();
-					},
-					onStallRetry: (phase, task, reason) => {
-						tracker.stallRetries.add(task.id);
-						tracker.stallReasons.set(task.id, reason);
-						tracker.startTimes.set(task.id, Date.now());
-						updateWidget();
-					},
-					onMergeResult: (result) => {
-						mergeResults.push(result);
-						updateWidget();
-					},
-					onLog: (line) => logLines.push(line),
-				});
-
-				clearInterval(refreshTimer);
-
-				totalCompleted += completed;
-				waveResults.push(waveResult);
-
-				if (!waveResult.passed) {
-					allPassed = false;
-
-					// Report failures with error details
-					const failedTasks = [
-						...waveResult.foundationResults,
-						...waveResult.featureResults.flatMap((f) => f.taskResults),
-						...waveResult.integrationResults,
-					].filter((r) => r.exitCode !== 0 && r.exitCode !== -1);
-
-					if (failedTasks.length > 0) {
-						const failMsg = failedTasks.map((t) => {
-							const err = tracker.errors.get(t.id) || extractBriefError(t);
-							const stallReason = tracker.stallReasons.get(t.id);
-							const fixResult = tracker.fixCycleResults.get(t.id);
-							let detail = `  - **${t.id}**: ${t.title}`;
-							detail += `\n    Error: ${err}`;
-							if (stallReason) detail += `\n    Stall: ${stallReason}`;
-							if (fixResult === false) detail += `\n    Fix cycle: attempted and failed`;
-							if (t.durationMs) detail += `\n    Duration: ${formatElapsed(t.durationMs)}`;
-							return detail;
-						}).join("\n");
-						pi.sendMessage(
-							{
-								customType: "wave-task-failures",
-								content: `❌ **${wave.name}** failed:\n\n${failMsg}`,
-								display: true,
-							},
-							{ triggerTurn: false },
-						);
-					}
-
-					// Report skipped tasks (downstream of failures)
-					const skippedTasks = [
-						...waveResult.foundationResults,
-						...waveResult.featureResults.flatMap((f) => f.taskResults),
-						...waveResult.integrationResults,
-					].filter((r) => r.exitCode === -1);
-
-					if (skippedTasks.length > 0) {
-						const skipMsg = skippedTasks.map((t) => `  - ${t.id}: ${t.title}`).join("\n");
-						pi.sendMessage(
-							{
-								customType: "wave-task-skipped",
-								content: `⏭ **${wave.name}** — ${skippedTasks.length} task(s) skipped (dependency failed):\n${skipMsg}`,
-								display: true,
-							},
-							{ triggerTurn: false },
-						);
-					}
-
-					// Report failed features with per-task breakdown
-					const failedFeatures = waveResult.featureResults.filter((f) => !f.passed);
-					if (failedFeatures.length > 0) {
-						const fMsg = failedFeatures.map((f) => {
-							const failedInFeature = f.taskResults.filter((t) => t.exitCode !== 0 && t.exitCode !== -1);
-							const taskDetails = failedInFeature.map((t) => {
-								const err = tracker.errors.get(t.id) || extractBriefError(t);
-								return `    - ${t.id}: ${err}`;
-							}).join("\n");
-							return `  - Feature "${f.name}":\n${taskDetails || "    (unknown failure)"}`;
-						}).join("\n");
-						pi.sendMessage(
-							{
-								customType: "wave-feature-failures",
-								content: `⚠️ **${wave.name}** — ${failedFeatures.length} feature(s) failed:\n${fMsg}`,
-								display: true,
-							},
-							{ triggerTurn: false },
-						);
-					}
-
-					writeLog();
-					break; // Stop at first failed wave — later waves depend on earlier ones
-				} else {
-					const allResults = [
-						...waveResult.foundationResults,
-						...waveResult.featureResults.flatMap((f) => f.taskResults),
-						...waveResult.integrationResults,
-					];
-					const passCount = allResults.filter((r) => r.exitCode === 0).length;
-					pi.sendMessage(
-						{
-							customType: "wave-pass",
-							content: `✅ **${wave.name}** — ${passCount}/${allResults.length} tasks passed`,
-							display: true,
-						},
-						{ triggerTurn: false },
-					);
-				}
-
-				writeLog();
-			}
-
-			// Final summary
-			ctx.ui.setWidget("wave-progress", undefined);
-
-			logLines.push("---", "", `Finished: ${new Date().toISOString()}`);
-			const stoppedEarly = !allPassed && waveResults.length < plan.waves.length;
-			logLines.push(`Result: ${allPassed ? "SUCCESS" : stoppedEarly ? "STOPPED — wave failed" : "COMPLETED WITH ISSUES"}`);
-			writeLog();
-
-			// Clean up state file on full success, keep it on failure for /waves-continue
-			if (allPassed) {
-				deleteState(planFile);
-			}
-
-			const icon = allPassed ? "✅" : "❌";
-			const verb = allPassed ? "Execution Complete" : stoppedEarly ? "Execution Stopped" : "Execution Complete (with issues)";
-			let finalSummary = `# ${icon} ${verb}\n\n`;
-			finalSummary += `**Goal:** ${plan.goal}\n`;
-			finalSummary += `**Tasks:** ${totalCompleted}/${totalTasks}\n`;
-			finalSummary += `**Waves:** ${waveResults.length}/${plan.waves.length}${stoppedEarly ? " (stopped at failure)" : ""}\n\n`;
-
-			for (const wr of waveResults) {
-				const allResults = [
-					...wr.foundationResults,
-					...wr.featureResults.flatMap((f) => f.taskResults),
-					...wr.integrationResults,
-				];
-				const passed = allResults.filter((r) => r.exitCode === 0).length;
-				const wIcon = wr.passed ? "✅" : "❌";
-				const featureInfo = wr.featureResults.length > 0
-					? ` (${wr.featureResults.filter((f) => f.passed).length}/${wr.featureResults.length} features)`
-					: "";
-				finalSummary += `${wIcon} **${wr.wave}**: ${passed}/${allResults.length} tasks${featureInfo}\n`;
-			}
-
-			if (!allPassed) {
-				finalSummary += `\nRun \`/waves-continue\` to retry after fixing issues.`;
-			}
-			finalSummary += `\n📄 Execution log: \`${path.relative(ctx.cwd, logPath)}\``;
-			finalSummary += `\n📂 Task logs: \`${path.relative(ctx.cwd, taskLogDir)}/\``;
-
-			pi.sendMessage(
-				{ customType: "wave-complete", content: finalSummary, display: true },
-				{ triggerTurn: false },
-			);
-
-			ctx.ui.setStatus("waves", allPassed
-				? ctx.ui.theme.fg("success", `✅ Done — ${totalCompleted} tasks`)
-				: ctx.ui.theme.fg("error", `❌ Stopped — wave ${waveResults.length} failed. /waves-continue to retry`),
-			);
-			setTimeout(() => ctx.ui.setStatus("waves", undefined), 15000);
+			await runWaveExecution({
+				plan, planFile, specContent, cwd: ctx.cwd,
+				startWave: 0,
+				skipSet: new Set(),
+				execState,
+				logPath, logLines,
+				taskLogDir: createTaskLogDir(logPath),
+				protectedPaths: [planFile, ...(spec ? [spec] : [])],
+				maxConcurrency: MAX_CONCURRENCY,
+				isResume: false,
+				pi, ctx,
+			});
 		},
 	});
 
@@ -1134,11 +587,7 @@ Do NOT write any files. Just output the outline as your response.`;
 				return;
 			}
 
-			const controller = new AbortController();
-			const waveResults: import("./types.js").WaveResult[] = [];
-			let allPassed = true;
-			let totalCompleted = 0;
-
+			// Build resume log header
 			const logPath = logFilePath(ctx.cwd, projectName);
 			const relPlanFile = path.relative(ctx.cwd, planFile);
 			const relSpecFile = spec ? path.relative(ctx.cwd, spec) : "(none)";
@@ -1153,352 +602,21 @@ Do NOT write any files. Just output the outline as your response.`;
 				`Plan: ${relPlanFile}`,
 				``,
 			];
-			const writeLog = () => {
-				fs.mkdirSync(path.dirname(logPath), { recursive: true });
-				fs.writeFileSync(logPath, logLines.join("\n"), "utf-8");
-			};
 
-			const protectedPaths = [planFile, ...(spec ? [spec] : [])];
-
-			// Per-task log directory (tied to execution version)
-			const taskLogDir = createTaskLogDir(logPath);
-
-			// Reuse the previous state (with completed task tracking)
-			const execState = prevState;
-
-			// Resume from the wave that was in progress
-			const totalTasks = plan.waves.reduce(
-				(s, w) => s + w.foundation.length + w.features.reduce((fs2, f) => fs2 + f.tasks.length, 0) + w.integration.length,
-				0,
-			);
-
-			for (let wi = resumeWave; wi < plan.waves.length; wi++) {
-				const wave = plan.waves[wi];
-				const waveLabel = `Wave ${wi + 1}/${plan.waves.length}: ${wave.name}`;
-				const waveTasks = [
-					...wave.foundation,
-					...wave.features.flatMap((f) => f.tasks),
-					...wave.integration,
-				];
-
-				advanceToWave(execState, wi);
-
-				ctx.ui.setStatus("waves", ctx.ui.theme.fg("accent", `⚡ ${waveLabel} (resumed)`));
-				logLines.push(`## ${waveLabel}`, "");
-
-				let completed = 0;
-				const tracker = createTaskTracker(waveTasks);
-				for (const t of waveTasks) {
-					if (skipSet.has(t.id)) tracker.statuses.set(t.id, "done");
-				}
-				let currentPhase: string | null = null;
-				const mergeResults: import("./types.js").MergeResult[] = [];
-
-				const updateWidget = () => {
-					ctx.ui.setWidget("wave-progress", (_tui, theme) => {
-						const container = new Container();
-						container.addChild(new Text(theme.fg("accent", `⚡ ${waveLabel} (resumed) — ${completed}/${waveTasks.length} done`), 1, 0));
-
-						if (wave.foundation.length > 0) {
-							container.addChild(new Text(theme.fg("dim", "  Foundation:"), 1, 0));
-							for (const t of wave.foundation) {
-								container.addChild(new Text(`    ${taskLine(ctx, t, tracker)}`, 1, 0));
-							}
-						}
-						for (const feature of wave.features) {
-							if (feature.name !== "default") {
-								container.addChild(new Text(theme.fg("dim", `  Feature: ${feature.name}`), 1, 0));
-							}
-							for (const t of feature.tasks) {
-								const indent = feature.name !== "default" ? "    " : "  ";
-								container.addChild(new Text(`${indent}${taskLine(ctx, t, tracker)}`, 1, 0));
-							}
-						}
-						if (currentPhase === "merge" && mergeResults.length === 0) {
-							container.addChild(new Text(theme.fg("dim", "  Merge:"), 1, 0));
-							container.addChild(new Text(`    ${theme.fg("warning", "⏳")} Merging feature branches...`, 1, 0));
-						} else if (mergeResults.length > 0) {
-							container.addChild(new Text(theme.fg("dim", "  Merge:"), 1, 0));
-							for (const mr of mergeResults) {
-								const icon = mr.success ? (mr.hadChanges ? theme.fg("success", "✓") : theme.fg("muted", "⏭")) : theme.fg("error", "✗");
-								container.addChild(new Text(`    ${icon} ${mr.source} → ${mr.target}`, 1, 0));
-							}
-						}
-						if (wave.integration.length > 0) {
-							container.addChild(new Text(theme.fg("dim", "  Integration:"), 1, 0));
-							for (const t of wave.integration) {
-								container.addChild(new Text(`    ${taskLine(ctx, t, tracker)}`, 1, 0));
-							}
-						}
-						const overallDone = totalCompleted + completed;
-						container.addChild(new Text("", 0, 0));
-						container.addChild(new Text(theme.fg("dim", `Overall: ${overallDone}/${totalTasks} tasks`), 1, 0));
-						return container;
-					});
-				};
-
-				updateWidget();
-				const refreshTimer = setInterval(updateWidget, 2000);
-
-				const currentSkipSet = completedTaskIds(execState);
-
-				const waveResult = await executeWave({
-					wave,
-					waveNum: wi + 1,
-					specContent,
-					dataSchemas: plan.dataSchemas,
-					protectedPaths,
-					cwd: ctx.cwd,
-					maxConcurrency: MAX_CONCURRENCY,
-					signal: controller.signal,
-					skipTaskIds: currentSkipSet,
-					taskLogDir,
-					onProgress: (update) => {
-						currentPhase = update.phase;
-						updateWidget();
-					},
-					onTaskStart: (phase, task) => {
-						tracker.statuses.set(task.id, "running");
-						tracker.startTimes.set(task.id, Date.now());
-						updateWidget();
-					},
-					onTaskEnd: (phase, task, result) => {
-						const status =
-							result.timedOut ? "timeout" :
-							result.exitCode === 0 ? "done" :
-							result.exitCode === -1 ? "skipped" : "failed";
-						tracker.statuses.set(task.id, status);
-
-						const startTime = tracker.startTimes.get(task.id);
-						if (startTime) tracker.durations.set(task.id, Date.now() - startTime);
-
-						if (result.exitCode !== 0 && result.exitCode !== -1) {
-							tracker.errors.set(task.id, extractBriefError(result));
-						}
-
-						if (tracker.fixCycles.has(task.id)) {
-							tracker.fixCycleResults.set(task.id, result.exitCode === 0);
-							tracker.fixCycles.delete(task.id);
-						}
-
-						completed++;
-						if (result.exitCode === 0) markTaskDone(execState, task.id);
-						else if (result.exitCode === -1) markTaskSkipped(execState, task.id);
-						else markTaskFailed(execState, task.id);
-						writeState(planFile!, execState);
-						updateWidget();
-					},
-					onFixCycleStart: (phase, task) => {
-						tracker.fixCycles.add(task.id);
-						updateWidget();
-					},
-					onStallRetry: (phase, task, reason) => {
-						tracker.stallRetries.add(task.id);
-						tracker.stallReasons.set(task.id, reason);
-						tracker.startTimes.set(task.id, Date.now());
-						updateWidget();
-					},
-					onMergeResult: (result) => {
-						mergeResults.push(result);
-						updateWidget();
-					},
-					onLog: (line) => logLines.push(line),
-				});
-
-				clearInterval(refreshTimer);
-				totalCompleted += completed;
-				waveResults.push(waveResult);
-
-				if (!waveResult.passed) {
-					allPassed = false;
-					const failedTasks = [
-						...waveResult.foundationResults,
-						...waveResult.featureResults.flatMap((f) => f.taskResults),
-						...waveResult.integrationResults,
-					].filter((r) => r.exitCode !== 0 && r.exitCode !== -1);
-					if (failedTasks.length > 0) {
-						const failMsg = failedTasks.map((t) => {
-							const err = tracker.errors.get(t.id) || extractBriefError(t);
-							let detail = `  - **${t.id}**: ${t.title}`;
-							detail += `\n    Error: ${err}`;
-							return detail;
-						}).join("\n");
-						pi.sendMessage(
-							{ customType: "wave-task-failures", content: `❌ **${wave.name}** failed:\n\n${failMsg}`, display: true },
-							{ triggerTurn: false },
-						);
-					}
-					break; // Stop at first failed wave
-				} else {
-					pi.sendMessage(
-						{ customType: "wave-pass", content: `✅ **${wave.name}** passed`, display: true },
-						{ triggerTurn: false },
-					);
-				}
-
-				writeLog();
-			}
-
-			ctx.ui.setWidget("wave-progress", undefined);
-			logLines.push("---", "", `Finished: ${new Date().toISOString()}`);
-			logLines.push(`Result: ${allPassed ? "SUCCESS" : "STILL HAS ISSUES"}`);
-			writeLog();
-
-			if (allPassed) deleteState(planFile);
-
-			const icon = allPassed ? "✅" : "⚠️";
-			const verb = allPassed ? "Resume Complete" : "Resume Stopped";
-			let finalSummary = `# ${icon} ${verb}\n\n`;
-			finalSummary += `**Goal:** ${plan.goal}\n`;
-			finalSummary += `**Tasks:** ${totalCompleted}/${totalTasks}\n\n`;
-			for (const wr of waveResults) {
-				const wIcon = wr.passed ? "✅" : "❌";
-				finalSummary += `${wIcon} **${wr.wave}**\n`;
-			}
-			if (!allPassed) {
-				finalSummary += `\nRun \`/waves-continue ${args.trim()}\` again after fixing issues.`;
-			}
-			finalSummary += `\n📄 Log: \`${path.relative(ctx.cwd, logPath)}\``;
-			finalSummary += `\n📂 Task logs: \`${path.relative(ctx.cwd, taskLogDir)}/\``;
-
-			pi.sendMessage(
-				{ customType: "wave-complete", content: finalSummary, display: true },
-				{ triggerTurn: false },
-			);
-
-			ctx.ui.setStatus("waves", allPassed
-				? ctx.ui.theme.fg("success", `✅ Resume done — ${totalCompleted} tasks`)
-				: ctx.ui.theme.fg("warning", `⚠️ Resume stopped — fix and /waves-continue`),
-			);
-			setTimeout(() => ctx.ui.setStatus("waves", undefined), 15000);
+			await runWaveExecution({
+				plan, planFile, specContent, cwd: ctx.cwd,
+				startWave: resumeWave,
+				skipSet,
+				execState: prevState,
+				logPath, logLines,
+				taskLogDir: createTaskLogDir(logPath),
+				protectedPaths: [planFile, ...(spec ? [spec] : [])],
+				maxConcurrency: MAX_CONCURRENCY,
+				isResume: true,
+				pi, ctx,
+			});
 		},
 	});
 }
 
-// ── Widget Helpers ─────────────────────────────────────────────────
 
-/** Per-task tracking state for rich progress display. */
-interface TaskTracker {
-	statuses: Map<string, string>;
-	startTimes: Map<string, number>;
-	durations: Map<string, number>;       // elapsed ms for completed tasks
-	errors: Map<string, string>;          // brief error reason for failed tasks
-	stallReasons: Map<string, string>;    // stall detection reason
-	fixCycles: Set<string>;               // tasks currently in fix cycle
-	fixCycleResults: Map<string, boolean>; // fix cycle outcomes (true = succeeded)
-	stallRetries: Set<string>;            // tasks currently retrying after stall
-}
-
-function createTaskTracker(tasks: Task[]): TaskTracker {
-	const statuses = new Map<string, string>();
-	for (const t of tasks) statuses.set(t.id, "pending");
-	return {
-		statuses,
-		startTimes: new Map(),
-		durations: new Map(),
-		errors: new Map(),
-		stallReasons: new Map(),
-		fixCycles: new Set(),
-		fixCycleResults: new Map(),
-		stallRetries: new Set(),
-	};
-}
-
-/**
- * Extract a brief, human-readable error reason from a task result.
- * Used for widget display and failure messages. Max ~100 chars.
- */
-function extractBriefError(result: TaskResult): string {
-	if (result.timedOut) return "timed out";
-
-	// Post-check failure (missing files)
-	const postCheck = result.output.match(/POST-CHECK FAILED:\s*([^\n]+)/);
-	if (postCheck) return postCheck[1].trim().slice(0, 100);
-
-	// Stall
-	const stallMatch = result.stderr.match(/Agent stalled:\s*(.+)/);
-	if (stallMatch) return `stall: ${stallMatch[1].trim().slice(0, 80)}`;
-
-	// First meaningful line of stderr
-	if (result.stderr) {
-		const lines = result.stderr.split("\n").filter((l) => l.trim());
-		// Skip "Task timed out" prefix line
-		const meaningful = lines.find((l) => !l.startsWith("Task timed out"));
-		if (meaningful) return meaningful.trim().slice(0, 100);
-	}
-
-	// Look for failure-related lines in output
-	const outputLines = result.output.split("\n");
-	const failLine = outputLines.find((l) =>
-		/\bfail|error|exception|assert|missing|not found/i.test(l) && l.trim().length > 5,
-	);
-	if (failLine) return failLine.trim().slice(0, 100);
-
-	return "exit code " + result.exitCode;
-}
-
-function statusIcon(ctx: any, status: string): string {
-	switch (status) {
-		case "done": return ctx.ui.theme.fg("success", "✓");
-		case "failed": return ctx.ui.theme.fg("error", "✗");
-		case "timeout": return ctx.ui.theme.fg("error", "⏰");
-		case "running": return ctx.ui.theme.fg("warning", "⏳");
-		case "retrying": return ctx.ui.theme.fg("warning", "🔄");
-		case "fixing": return ctx.ui.theme.fg("warning", "🔧");
-		case "skipped": return ctx.ui.theme.fg("muted", "⏭");
-		default: return ctx.ui.theme.fg("muted", "○");
-	}
-}
-
-function agentTag(t: Task): string {
-	return t.agent === "test-writer" ? "🧪" : t.agent === "wave-verifier" ? "🔍" : "🔨";
-}
-
-function formatElapsed(ms: number): string {
-	const seconds = Math.floor(ms / 1000);
-	if (seconds < 60) return `${seconds}s`;
-	const minutes = Math.floor(seconds / 60);
-	const secs = seconds % 60;
-	return `${minutes}m ${secs.toString().padStart(2, "0")}s`;
-}
-
-function taskLine(ctx: any, t: Task, tracker: TaskTracker): string {
-	const status = tracker.statuses.get(t.id) ?? "pending";
-	const isFixing = tracker.fixCycles.has(t.id);
-	const isRetrying = tracker.stallRetries.has(t.id);
-	const effectiveStatus = isRetrying ? "retrying" : isFixing ? "fixing" : status;
-	const icon = statusIcon(ctx, effectiveStatus);
-	const tag = agentTag(t);
-	let line = `${icon} ${tag} ${t.id}: ${t.title}`;
-
-	// Elapsed time — running (live) or completed (final)
-	if (status === "running") {
-		const startTime = tracker.startTimes.get(t.id);
-		if (startTime) {
-			line += ctx.ui.theme.fg("dim", ` (${formatElapsed(Date.now() - startTime)})`);
-		}
-	} else if (tracker.durations.has(t.id)) {
-		line += ctx.ui.theme.fg("dim", ` (${formatElapsed(tracker.durations.get(t.id)!)})`);
-	}
-
-	// Status annotations
-	if (status === "running" && isRetrying) {
-		const reason = tracker.stallReasons.get(t.id);
-		line += ctx.ui.theme.fg("warning", ` [stall → retry${reason ? ": " + reason.slice(0, 50) : ""}]`);
-	} else if (status === "running" && isFixing) {
-		line += ctx.ui.theme.fg("warning", " [fix cycle]");
-	} else if (status === "failed" || status === "timeout") {
-		const err = tracker.errors.get(t.id);
-		if (err) line += ctx.ui.theme.fg("error", ` — ${err}`);
-		// Show fix cycle outcome if there was one
-		const fixResult = tracker.fixCycleResults.get(t.id);
-		if (fixResult === false) line += ctx.ui.theme.fg("error", " [fix failed]");
-	} else if (status === "done") {
-		const fixResult = tracker.fixCycleResults.get(t.id);
-		if (fixResult === true) line += ctx.ui.theme.fg("success", " [fix succeeded]");
-	} else if (status === "skipped") {
-		line += ctx.ui.theme.fg("muted", " (dep failed)");
-	}
-
-	return line;
-}
