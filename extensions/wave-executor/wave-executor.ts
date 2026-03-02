@@ -21,6 +21,7 @@ import {
 import { executeDAG, mapConcurrent } from "./dag.js";
 import { executeFeature } from "./feature-executor.js";
 import {
+	appendTaskLog,
 	checkDeclaredFiles,
 	extractFinalOutput,
 	extractSpecSections,
@@ -167,7 +168,10 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 					// Per-task commit — each successful task gets its own commit
 					if (taskResult.exitCode === 0 && useGit && repoRoot) {
 						const committed = commitTaskOutput(repoRoot, task.id, task.title, task.agent);
-						if (committed) onLog?.(`   📌 Committed: ${task.id} [${task.agent}] — ${task.title}`);
+						if (committed) {
+							onLog?.(`   📌 Committed: ${task.id} [${task.agent}] — ${task.title}`);
+							appendTaskLog(tLogFile, `\n📌 Committed by orchestrator: pi: ${task.id} [${task.agent}] — ${task.title}`);
+						}
 					}
 
 					onTaskEnd?.("foundation", task, taskResult);
@@ -375,7 +379,10 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 					// Per-task commit — each successful task gets its own commit
 					if (taskResult.exitCode === 0 && useGit && repoRoot) {
 						const committed = commitTaskOutput(repoRoot, task.id, task.title, task.agent);
-						if (committed) onLog?.(`   📌 Committed: ${task.id} [${task.agent}] — ${task.title}`);
+						if (committed) {
+							onLog?.(`   📌 Committed: ${task.id} [${task.agent}] — ${task.title}`);
+							appendTaskLog(tLogFile, `\n📌 Committed by orchestrator: pi: ${task.id} [${task.agent}] — ${task.title}`);
+						}
 					}
 
 					onTaskEnd?.("integration", task, taskResult);

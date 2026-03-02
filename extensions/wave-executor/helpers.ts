@@ -357,6 +357,12 @@ export function createTaskLogDir(executionLogPath: string): string {
 	return dir;
 }
 
+/** Append a line to an already-closed task log file (best effort). */
+export function appendTaskLog(logFile: string | undefined, text: string): void {
+	if (!logFile) return;
+	try { fs.appendFileSync(logFile, `${text}\n`); } catch { /* best effort */ }
+}
+
 /** Get the log file path for a task, including agent role suffix. */
 export function taskLogFile(logDir: string, taskId: string, agent?: string): string {
 	const suffix = agent === "test-writer" ? "-test"

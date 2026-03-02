@@ -17,6 +17,7 @@ import {
 } from "../subagent/git-worktree.js";
 import { buildDAG, mapConcurrent } from "./dag.js";
 import {
+	appendTaskLog,
 	checkDeclaredFiles,
 	extractFinalOutput,
 	extractSpecSections,
@@ -212,7 +213,10 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 				// Sub-worktree tasks are committed during mergeSubWorktrees instead.
 				if (taskResult.exitCode === 0 && !actuallyParallel) {
 					const committed = commitTaskOutput(taskCwd, task.id, task.title, task.agent);
-					if (committed) onLog?.(`   📌 Committed: ${task.id} [${task.agent}] — ${task.title}`);
+					if (committed) {
+						onLog?.(`   📌 Committed: ${task.id} [${task.agent}] — ${task.title}`);
+						appendTaskLog(tLogFile, `\n📌 Committed by orchestrator: pi: ${task.id} [${task.agent}] — ${task.title}`);
+					}
 				}
 
 				if (taskResult.exitCode !== 0) {
