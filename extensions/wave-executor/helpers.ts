@@ -206,6 +206,142 @@ export function logFilePath(cwd: string, name: string): string {
 	return path.join(dir, `execution-v${v}.md`);
 }
 
+// ── Migrate Loose Files ────────────────────────────────────────────
+//
+// Detect wave-related files outside .pi/waves/ and move them in.
+// Scans: project root, docs/spec/, docs/plan/, legacy SPEC.md/PLAN.md.
+//
+
+/** Detect the file type from a filename. */
+function detectFileType(filename: string): FileType | null {
+	const lower = filename.toLowerCase();
+	if (lower.includes("execution")) return "execution";
+	if (lower.includes("spec")) return "spec";
+	if (lower.includes("plan")) return "plan";
+	return null;
+}
+
+/** Derive a project name from a loose file in the project root. */
+function deriveProjectName(filename: string, cwd: string): string {
+	let name = path.basename(filename, path.extname(filename));
+	name = name
+		.replace(/[-_]?(spec|plan|execution)[-_]?/gi, "")
+		.replace(/[-_]?v\d+$/i, "")
+		.replace(/[-_]?\d{4}-\d{2}-\d{2}[-_T]?\d{2}[-:]\d{2}([-:]\d{2})?/g, "")
+		.replace(/^-+|-+$/g, "");
+	if (name) return slugify(name);
+	return slugify(path.basename(cwd));
+}
+
+/** Move a file into .pi/waves/<project>/ as the next version. Returns dest path or null if already there. */
+function adoptFile(cwd: string, project: string, type: FileType, srcPath: string): string | null {
+	const dir = projectDir(cwd, project);
+	if (path.resolve(path.dirname(srcPath)) === path.resolve(dir)) return null; // already in place
+	ensureProjectDir(cwd, project);
+	const v = nextVersion(dir, type);
+	const dest = path.join(dir, `${type}-v${v}.md`);
+	fs.renameSync(srcPath, dest);
+	return dest;
+}
+
+/**
+ * Scan for wave-related files outside .pi/waves/ and move them to the standard location.
+ * Returns human-readable descriptions of what was moved (empty if nothing found).
+ *
+ * Checks:
+ * 1. Project root — *.md files with "spec"/"plan"/"execution" in the name
+ * 2. Old layout — docs/spec/<project>/ and docs/plan/<project>/
+ * 3. Legacy naming — .pi/waves/<project>/SPEC.md → spec-v1.md
+ */
+export function migrateLooseFiles(cwd: string): string[] {
+	const moved: string[] = [];
+	const rel = (p: string) => path.relative(cwd, p);
+
+	// ── 1. Project root: loose spec/plan/execution .md files ────────
+
+	try {
+		for (const entry of fs.readdirSync(cwd, { withFileTypes: true })) {
+			if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
+			const type = detectFileType(entry.name);
+			if (!type) continue;
+			const src = path.join(cwd, entry.name);
+			const project = deriveProjectName(entry.name, cwd);
+			const dest = adoptFile(cwd, project, type, src);
+			if (dest) moved.push(`${rel(src)} → ${rel(dest)}`);
+		}
+	} catch { /* cwd unreadable */ }
+
+	// ── 2. Old layout: docs/spec/ and docs/plan/ ───────────────────
+
+	for (const [oldBase, defaultType] of [
+		[path.join(cwd, "docs", "spec"), "spec" as FileType],
+		[path.join(cwd, "docs", "plan"), "plan" as FileType],
+	]) {
+		if (!fs.existsSync(oldBase) || !fs.statSync(oldBase).isDirectory()) continue;
+
+		for (const projEntry of fs.readdirSync(oldBase, { withFileTypes: true })) {
+			if (!projEntry.isDirectory()) continue;
+			const projDir = path.join(oldBase, projEntry.name);
+
+			for (const fileEntry of fs.readdirSync(projDir, { withFileTypes: true })) {
+				if (!fileEntry.isFile()) continue;
+
+				// .md files → move as spec/plan/execution
+				if (fileEntry.name.endsWith(".md")) {
+					const type = detectFileType(fileEntry.name) || defaultType;
+					const src = path.join(projDir, fileEntry.name);
+					const dest = adoptFile(cwd, projEntry.name, type, src);
+					if (dest) moved.push(`${rel(src)} → ${rel(dest)}`);
+				}
+
+				// .state.json files → move as state.json
+				if (fileEntry.name.endsWith(".state.json")) {
+					const src = path.join(projDir, fileEntry.name);
+					const destDir = projectDir(cwd, projEntry.name);
+					ensureProjectDir(cwd, projEntry.name);
+					const dest = path.join(destDir, "state.json");
+					if (!fs.existsSync(dest)) {
+						fs.renameSync(src, dest);
+						moved.push(`${rel(src)} → ${rel(dest)}`);
+					}
+				}
+			}
+
+			// Clean up empty project dir
+			try { fs.rmdirSync(projDir); } catch { /* not empty */ }
+		}
+
+		// Clean up empty docs/spec or docs/plan dir
+		try { fs.rmdirSync(oldBase); } catch { /* not empty */ }
+	}
+
+	// Clean up empty docs/ dir
+	try { fs.rmdirSync(path.join(cwd, "docs")); } catch { /* not empty */ }
+
+	// ── 3. Legacy naming: SPEC.md / PLAN.md in .pi/waves/<project>/ ─
+
+	const wDir = wavesBaseDir(cwd);
+	if (fs.existsSync(wDir)) {
+		for (const projEntry of fs.readdirSync(wDir, { withFileTypes: true })) {
+			if (!projEntry.isDirectory()) continue;
+			const projDir = path.join(wDir, projEntry.name);
+			for (const [legacyName, type] of [
+				["SPEC.md", "spec"],
+				["PLAN.md", "plan"],
+			] as [string, FileType][]) {
+				const legacy = path.join(projDir, legacyName);
+				if (!fs.existsSync(legacy)) continue;
+				const v = nextVersion(projDir, type);
+				const dest = path.join(projDir, `${type}-v${v}.md`);
+				fs.renameSync(legacy, dest);
+				moved.push(`${rel(legacy)} → ${rel(dest)}`);
+			}
+		}
+	}
+
+	return moved;
+}
+
 // ── Find Paths (locate existing files) ─────────────────────────────
 
 /**

@@ -39,6 +39,7 @@ import {
 	findSpecFile,
 	listWaveProjects,
 	logFilePath,
+	migrateLooseFiles,
 	planPath,
 	projectDir,
 	projectSummary,
@@ -66,6 +67,15 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("waves", {
 		description: "List wave projects in this repo",
 		handler: async (_args, ctx) => {
+			// Auto-migrate any loose files first
+			const migrations = migrateLooseFiles(ctx.cwd);
+			if (migrations.length > 0) {
+				ctx.ui.notify(
+					`📦 Migrated ${migrations.length} file(s) to .pi/waves/:\n${migrations.map((m) => `  ${m}`).join("\n")}`,
+					"info",
+				);
+			}
+
 			const projects = listWaveProjects(ctx.cwd);
 			if (projects.length === 0) {
 				ctx.ui.notify("No wave projects yet. Run /waves-spec <task> to create one.", "info");
@@ -394,6 +404,15 @@ Only after validation passes, tell the user: "Next step: \`/waves-execute ${proj
 	pi.registerCommand("waves-plan", {
 		description: "Create a plan for a wave project (e.g. /waves-plan my-project)",
 		handler: async (args, ctx) => {
+			// Auto-migrate any loose files first
+			const migrations = migrateLooseFiles(ctx.cwd);
+			if (migrations.length > 0) {
+				ctx.ui.notify(
+					`📦 Migrated ${migrations.length} file(s) to .pi/waves/:\n${migrations.map((m) => `  ${m}`).join("\n")}`,
+					"info",
+				);
+			}
+
 			let projectName: string;
 			let extraInstructions: string;
 			let spec: string;
@@ -511,6 +530,15 @@ Do NOT write any files. Just output the outline as your response.`;
 	pi.registerCommand("waves-execute", {
 		description: "Execute a wave plan (e.g. /waves-execute my-project)",
 		handler: async (args, ctx) => {
+			// Auto-migrate any loose files first
+			const migrations = migrateLooseFiles(ctx.cwd);
+			if (migrations.length > 0) {
+				ctx.ui.notify(
+					`📦 Migrated ${migrations.length} file(s) to .pi/waves/:\n${migrations.map((m) => `  ${m}`).join("\n")}`,
+					"info",
+				);
+			}
+
 			if (!args?.trim()) {
 				// No args: show available projects with plans, or auto-select if only one
 				const projects = listWaveProjects(ctx.cwd);
@@ -940,6 +968,15 @@ Do NOT write any files. Just output the outline as your response.`;
 	pi.registerCommand("waves-continue", {
 		description: "Resume a failed wave execution from where it left off",
 		handler: async (args, ctx) => {
+			// Auto-migrate any loose files first
+			const migrations = migrateLooseFiles(ctx.cwd);
+			if (migrations.length > 0) {
+				ctx.ui.notify(
+					`📦 Migrated ${migrations.length} file(s) to .pi/waves/:\n${migrations.map((m) => `  ${m}`).join("\n")}`,
+					"info",
+				);
+			}
+
 			if (!args?.trim()) {
 				// Find projects with state.json files
 				const projects = listWaveProjects(ctx.cwd);
