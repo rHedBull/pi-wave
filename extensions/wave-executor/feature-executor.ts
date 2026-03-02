@@ -232,7 +232,7 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 
 		// Merge sub-worktrees back into feature branch if we used them
 		if (actuallyParallel && subWorktrees.length > 0) {
-			mergeSubWorktrees(
+			await mergeSubWorktrees(
 				featureWorktree!,
 				subWorktrees,
 				levelResults.map((r) => ({ taskId: r.id, exitCode: r.exitCode, title: r.title, agent: r.agent })),

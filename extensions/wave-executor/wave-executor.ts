@@ -277,7 +277,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 				onProgress?.({ phase: "merge" });
 				onLog?.("### Merge");
 
-				const mergeResults = mergeFeatureBranches(
+				const mergeResults = await mergeFeatureBranches(
 					repoRoot!,
 					allFeatureWorktrees,
 					fResults.map((r) => ({ featureName: r.name, passed: r.passed })),

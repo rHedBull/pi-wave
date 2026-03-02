@@ -13,6 +13,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { FeatureWorktree, MergeResult, SubWorktree } from "../wave-executor/types.js";
+import { runSubagent, extractFinalOutput } from "../wave-executor/helpers.js";
 
 // ── Git helpers (kept from original) ─────────────────────────────────────
 
@@ -211,6 +212,50 @@ export function createSubWorktrees(
 	return subWorktrees;
 }
 
+// ── Merge Conflict Resolution ────────────────────────────────────────────
+
+/**
+ * Attempt to resolve merge conflicts using an agent.
+ * Returns true if conflicts were resolved and committed, false otherwise.
+ */
+async function tryResolveConflicts(dir: string, source: string, target: string): Promise<boolean> {
+	try {
+		const conflictOutput = git("diff --name-only --diff-filter=U", dir);
+		const conflictFiles = conflictOutput.split("\n").filter(Boolean);
+		if (conflictFiles.length === 0) return false;
+
+		const result = await runSubagent(
+			"wave-doctor",
+			[
+				`Resolve git merge conflicts in ${dir}.`,
+				`Merging branch "${source}" into "${target}".`,
+				`Conflicted files: ${conflictFiles.join(", ")}`,
+				``,
+				`Steps:`,
+				`1. Read each conflicted file and understand both sides`,
+				`2. Resolve by keeping BOTH sides' changes (these are parallel features adding different code)`,
+				`3. Edit each file to remove conflict markers and include all changes`,
+				`4. Run: git add <file> for each resolved file`,
+				`5. Run: git commit --no-edit`,
+				``,
+				`Do NOT delete or discard either side. Both features' code must be preserved.`,
+			].join("\n"),
+			dir, undefined, undefined, 120_000,
+		);
+
+		if (result.exitCode === 0) {
+			// Verify no conflicts remain
+			try {
+				const remaining = git("diff --name-only --diff-filter=U", dir);
+				return !remaining.trim();
+			} catch {
+				return true; // git diff fails if not in merge state = already resolved
+			}
+		}
+	} catch {}
+	return false;
+}
+
 // ── Merge Sub-worktrees → Feature Branch ─────────────────────────────────
 
 /**
@@ -219,11 +264,11 @@ export function createSubWorktrees(
  *
  * Returns merge results for each sub-worktree.
  */
-export function mergeSubWorktrees(
+export async function mergeSubWorktrees(
 	featureWorktree: FeatureWorktree,
 	subWorktrees: SubWorktree[],
 	results: { taskId: string; exitCode: number; title?: string; agent?: string }[],
-): MergeResult[] {
+): Promise<MergeResult[]> {
 	const mergeResults: MergeResult[] = [];
 	const resultMap = new Map(results.map((r) => [r.taskId, r]));
 
@@ -299,17 +344,28 @@ export function mergeSubWorktrees(
 				hadChanges: true,
 			});
 		} catch {
-			// Merge conflict — abort and keep branch
-			try {
-				git(`-C "${featureWorktree.dir}" merge --abort`, featureWorktree.repoRoot);
-			} catch {}
-			mergeResults.push({
-				source: sw.branch,
-				target: featureWorktree.branch,
-				success: false,
-				hadChanges: true,
-				error: `Merge conflict — branch "${sw.branch}" preserved for manual resolution`,
-			});
+			// Merge conflict — try agent resolution before aborting
+			const resolved = await tryResolveConflicts(featureWorktree.dir, sw.branch, featureWorktree.branch);
+			if (resolved) {
+				tryDeleteBranch(featureWorktree.repoRoot, sw.branch);
+				mergeResults.push({
+					source: sw.branch,
+					target: featureWorktree.branch,
+					success: true,
+					hadChanges: true,
+				});
+			} else {
+				try {
+					git(`-C "${featureWorktree.dir}" merge --abort`, featureWorktree.repoRoot);
+				} catch {}
+				mergeResults.push({
+					source: sw.branch,
+					target: featureWorktree.branch,
+					success: false,
+					hadChanges: true,
+					error: `Merge conflict — branch "${sw.branch}" preserved for manual resolution`,
+				});
+			}
 		}
 	}
 
@@ -324,11 +380,11 @@ export function mergeSubWorktrees(
  *
  * Returns merge results for each feature.
  */
-export function mergeFeatureBranches(
+export async function mergeFeatureBranches(
 	repoRoot: string,
 	featureWorktrees: FeatureWorktree[],
 	results: { featureName: string; passed: boolean }[],
-): MergeResult[] {
+): Promise<MergeResult[]> {
 	const mergeResults: MergeResult[] = [];
 	const resultMap = new Map(results.map((r) => [r.featureName, r]));
 	const baseBranch = getCurrentBranch(repoRoot);
@@ -396,16 +452,28 @@ export function mergeFeatureBranches(
 				hadChanges: true,
 			});
 		} catch {
-			try {
-				git("merge --abort", repoRoot);
-			} catch {}
-			mergeResults.push({
-				source: fw.branch,
-				target: baseBranch,
-				success: false,
-				hadChanges: true,
-				error: `Merge conflict — branch "${fw.branch}" preserved for manual resolution`,
-			});
+			// Merge conflict — try agent resolution before aborting
+			const resolved = await tryResolveConflicts(repoRoot, fw.branch, baseBranch);
+			if (resolved) {
+				tryDeleteBranch(repoRoot, fw.branch);
+				mergeResults.push({
+					source: fw.branch,
+					target: baseBranch,
+					success: true,
+					hadChanges: true,
+				});
+			} else {
+				try {
+					git("merge --abort", repoRoot);
+				} catch {}
+				mergeResults.push({
+					source: fw.branch,
+					target: baseBranch,
+					success: false,
+					hadChanges: true,
+					error: `Merge conflict — branch "${fw.branch}" preserved for manual resolution`,
+				});
+			}
 		}
 	}
 
