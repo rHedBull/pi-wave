@@ -166,7 +166,8 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 
 					// Per-task commit — each successful task gets its own commit
 					if (taskResult.exitCode === 0 && useGit && repoRoot) {
-						commitTaskOutput(repoRoot, task.id, task.title, task.agent);
+						const committed = commitTaskOutput(repoRoot, task.id, task.title, task.agent);
+						if (committed) onLog?.(`   📌 Committed: ${task.id} [${task.agent}] — ${task.title}`);
 					}
 
 					onTaskEnd?.("foundation", task, taskResult);
@@ -253,6 +254,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 						},
 						onFixCycleStart: (task) => onFixCycleStart?.(`feature:${feature.name}`, task),
 						onStallRetry: (task, reason) => onStallRetry?.(`feature:${feature.name}`, task, reason),
+						onLog,
 					});
 
 					featureStatuses[idx].status = result.passed ? "done" : "failed";
@@ -372,7 +374,8 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 
 					// Per-task commit — each successful task gets its own commit
 					if (taskResult.exitCode === 0 && useGit && repoRoot) {
-						commitTaskOutput(repoRoot, task.id, task.title, task.agent);
+						const committed = commitTaskOutput(repoRoot, task.id, task.title, task.agent);
+						if (committed) onLog?.(`   📌 Committed: ${task.id} [${task.agent}] — ${task.title}`);
 					}
 
 					onTaskEnd?.("integration", task, taskResult);

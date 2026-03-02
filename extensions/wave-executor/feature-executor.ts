@@ -53,6 +53,7 @@ export interface FeatureExecutorOptions {
 	onTaskEnd?: (task: Task, result: TaskResult) => void;
 	onFixCycleStart?: (task: Task) => void;
 	onStallRetry?: (task: Task, reason: string) => void;
+	onLog?: (line: string) => void;
 }
 
 // ── Execute Feature ────────────────────────────────────────────────
@@ -74,6 +75,7 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 		onTaskEnd,
 		onFixCycleStart,
 		onStallRetry,
+		onLog,
 	} = opts;
 
 	const featureCwd = featureWorktree?.dir ?? cwd;
@@ -209,7 +211,8 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 				// Per-task commit — sequential tasks in feature worktree (or base branch)
 				// Sub-worktree tasks are committed during mergeSubWorktrees instead.
 				if (taskResult.exitCode === 0 && !actuallyParallel) {
-					commitTaskOutput(taskCwd, task.id, task.title, task.agent);
+					const committed = commitTaskOutput(taskCwd, task.id, task.title, task.agent);
+					if (committed) onLog?.(`   📌 Committed: ${task.id} [${task.agent}] — ${task.title}`);
 				}
 
 				if (taskResult.exitCode !== 0) {
