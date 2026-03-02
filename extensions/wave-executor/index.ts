@@ -227,17 +227,19 @@ export default function (pi: ExtensionAPI) {
 
 Your output should be a structured outline covering:
 
-1. **Waves as milestones** — for each wave:
+1. **Project structure** — a directory tree showing existing dirs the code lives in and new dirs being added. Mark new dirs with ← new. This gives everyone a shared map of the codebase layout.
+
+2. **Waves as milestones** — for each wave:
    - Wave number and name
    - What "working" means at wave end (the milestone)
    - Foundation: what shared contracts/scaffolding are created
 
-2. **Feature parallelization** — for each wave:
+3. **Feature parallelization** — for each wave:
    - Which features run in parallel (and why they're independent)
    - Files each feature owns
    - Key task dependencies within each feature (e.g., test → implement → verify)
 
-3. **Integration** — for each wave:
+4. **Integration** — for each wave:
    - What glue work is needed after features merge
    - What the integration verification covers
 

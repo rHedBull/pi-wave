@@ -185,8 +185,23 @@ One sentence.
 ## Reference
 - Spec: \`${relSpec}\`
 
+## Project Structure
+Tree of directories and key files the plan will create or modify.
+Show existing dirs the project builds into and new dirs being added.
+\`\`\`
+src/
+  backend/
+    auth/           ← new
+    db/
+  frontend/
+    components/
+tests/
+  backend/
+    auth/           ← new
+\`\`\`
+
 ## TDD Approach
-Brief: framework, patterns, directory structure.
+Brief: framework, patterns.
 
 ---
 
