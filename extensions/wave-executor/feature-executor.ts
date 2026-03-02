@@ -164,7 +164,7 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 					? feature.tasks.filter(t => t.agent !== "wave-verifier").flatMap(t => t.files)
 					: undefined;
 
-				const tLogFile = taskLogDir ? taskLogFile(taskLogDir, task.id) : undefined;
+				const tLogFile = taskLogDir ? taskLogFile(taskLogDir, task.id, task.agent) : undefined;
 				const result = await runSingleTask(task, taskCwd, specContent, dataSchemas, protectedPaths, signal, onStallRetry, featureFiles, tLogFile);
 				const elapsed = Date.now() - start;
 
@@ -361,7 +361,8 @@ IMPORTANT:
 		};
 	}
 
-	let result = await runSubagent(agentName, agentTask, cwd, signal, fileRules, undefined, logFile);
+	const logCtx = [`Task: ${task.id} — ${task.title}`, `Role: ${agentName}`, `Files: ${task.files.join(", ") || "(none)"}`];
+	let result = await runSubagent(agentName, agentTask, cwd, signal, fileRules, undefined, logFile, logCtx);
 
 	// Stall retry: if agent got stuck in a loop, interrupt and retry with guidance
 	if (result.stall) {
@@ -375,7 +376,7 @@ IMPORTANT:
 			`The previous agent's partial work may already be on disk — check what exists before starting.`,
 		].join("\n");
 		// Retry appends to the same log file
-		result = await runSubagent(agentName, agentTask + stallContext, cwd, signal, fileRules, undefined, logFile);
+		result = await runSubagent(agentName, agentTask + stallContext, cwd, signal, fileRules, undefined, logFile, [`${logCtx[0]} (stall retry)`, ...logCtx.slice(1)]);
 	}
 
 	const output = extractFinalOutput(result.stdout);

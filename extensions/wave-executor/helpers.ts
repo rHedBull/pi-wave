@@ -357,9 +357,13 @@ export function createTaskLogDir(executionLogPath: string): string {
 	return dir;
 }
 
-/** Get the log file path for a task. */
-export function taskLogFile(logDir: string, taskId: string): string {
-	return path.join(logDir, `${taskId}.log`);
+/** Get the log file path for a task, including agent role suffix. */
+export function taskLogFile(logDir: string, taskId: string, agent?: string): string {
+	const suffix = agent === "test-writer" ? "-test"
+		: agent === "wave-verifier" ? "-verify"
+		: agent === "worker" ? "-impl"
+		: "";
+	return path.join(logDir, `${taskId}${suffix}.log`);
 }
 
 // ── Find Paths (locate existing files) ─────────────────────────────
@@ -648,6 +652,8 @@ export function runSubagent(
 	fileRules?: FileAccessRules,
 	timeoutMs?: number,
 	logFile?: string,
+	/** Extra lines for the log header (task ID, title, etc.) */
+	logContext?: string[],
 ): Promise<SubagentResult> {
 	return new Promise((resolve) => {
 		const args = ["--mode", "json", "-p", "--no-session"];
@@ -697,6 +703,9 @@ export function runSubagent(
 				fs.mkdirSync(path.dirname(logFile), { recursive: true });
 				logFd = fs.openSync(logFile, "w");
 				fs.writeSync(logFd, `=== Agent: ${agentName} ===\n`);
+				if (logContext) {
+					for (const line of logContext) fs.writeSync(logFd, `${line}\n`);
+				}
 				fs.writeSync(logFd, `Started: ${new Date().toISOString()}\n`);
 				fs.writeSync(logFd, `CWD: ${cwd}\n\n`);
 			} catch { /* best effort */ }

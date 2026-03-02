@@ -144,7 +144,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 						? wave.foundation.filter(t => t.agent !== "wave-verifier").flatMap(t => t.files)
 						: undefined;
 
-					const tLogFile = taskLogDir ? taskLogFile(taskLogDir, task.id) : undefined;
+					const tLogFile = taskLogDir ? taskLogFile(taskLogDir, task.id, task.agent) : undefined;
 					const result = await runTaskOnBase(task, cwd, specContent, dataSchemas, protectedPaths, signal,
 						(t, reason) => onStallRetry?.("foundation", t, reason), foundationFiles, tLogFile);
 					let taskResult: TaskResult = { ...result, durationMs: Date.now() - start };
@@ -332,7 +332,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 						]
 						: undefined;
 
-					const tLogFile = taskLogDir ? taskLogFile(taskLogDir, task.id) : undefined;
+					const tLogFile = taskLogDir ? taskLogFile(taskLogDir, task.id, task.agent) : undefined;
 					const result = await runTaskOnBase(task, cwd, specContent, dataSchemas, protectedPaths, signal,
 						(t, reason) => onStallRetry?.("integration", t, reason), allWaveFiles, tLogFile);
 					let taskResult: TaskResult = { ...result, durationMs: Date.now() - start };
@@ -504,7 +504,8 @@ IMPORTANT:
 		};
 	}
 
-	let result = await runSubagent(agentName, agentTask, cwd, signal, fileRules, undefined, logFile);
+	const logCtx = [`Task: ${task.id} — ${task.title}`, `Role: ${agentName}`, `Files: ${task.files.join(", ") || "(none)"}`];
+	let result = await runSubagent(agentName, agentTask, cwd, signal, fileRules, undefined, logFile, logCtx);
 
 	// Stall retry: if agent got stuck in a loop, interrupt and retry with guidance
 	if (result.stall) {
@@ -518,7 +519,7 @@ IMPORTANT:
 			`The previous agent's partial work may already be on disk — check what exists before starting.`,
 		].join("\n");
 		// Retry appends to the same log file
-		result = await runSubagent(agentName, agentTask + stallContext, cwd, signal, fileRules, undefined, logFile);
+		result = await runSubagent(agentName, agentTask + stallContext, cwd, signal, fileRules, undefined, logFile, [`${logCtx[0]} (stall retry)`, ...logCtx.slice(1)]);
 	}
 
 	const output = extractFinalOutput(result.stdout);
