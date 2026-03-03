@@ -5,10 +5,10 @@
  * file access enforcement.
  */
 
-import { execSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createRunner } from "../runner/index.js";
 import type { FileAccessRules } from "./types.js";
 
 // ── Version ────────────────────────────────────────────────────────
@@ -101,24 +101,12 @@ export function extractSpecSections(specContent: string, specRefs: string[]): st
 }
 
 /**
- * Extract the final assistant text from JSON-mode pi output.
+ * Extract the final assistant text from agent output.
+ * Delegates to the configured runner for format-aware parsing.
  */
 export function extractFinalOutput(jsonLines: string): string {
-	const lines = jsonLines.split("\n").filter((l) => l.trim());
-	let lastText = "";
-	for (const line of lines) {
-		try {
-			const event = JSON.parse(line);
-			if (event.type === "message_end" && event.message?.role === "assistant") {
-				for (const part of event.message.content) {
-					if (part.type === "text") lastText = part.text;
-				}
-			}
-		} catch {
-			/* skip */
-		}
-	}
-	return lastText;
+	const runner = createRunner();
+	return runner.extractFinalOutput(jsonLines);
 }
 
 // ── Path Helpers ───────────────────────────────────────────────────
@@ -592,80 +580,22 @@ export function cleanupEnforcement(filePath: string, dir: string): void {
 
 // ── Subagent Runner ────────────────────────────────────────────────
 
-/** Default per-task timeout: 10 minutes */
-export const DEFAULT_TASK_TIMEOUT_MS = 10 * 60 * 1000;
+// Re-export stall constants and types from the runner for backward compatibility
+export {
+	DEFAULT_TASK_TIMEOUT_MS,
+	HANGING_TOOL_TIMEOUT_MS,
+	STALL_SOFT_IDENTICAL_CALLS,
+	STALL_HARD_IDENTICAL_CALLS,
+	STALL_SOFT_CONSECUTIVE_ERRORS,
+	STALL_HARD_CONSECUTIVE_ERRORS,
+} from "../runner/pi-runner.js";
+export type { StallInfo, RunnerResult as SubagentResult } from "../runner/types.js";
 
 /**
- * Hanging tool timeout: if a single bash command produces no JSON events
- * for this long, kill its child process (not the agent). The agent sees
- * the command fail and continues. Catches dev servers, accidental
- * `docker compose up`, etc. Long builds that complete within this window
- * are unaffected.
- */
-export const HANGING_TOOL_TIMEOUT_MS = 3 * 60 * 1000;
-
-/**
- * Send SIGINT to all direct children of a process.
- * Used to interrupt a hanging bash command without killing the pi agent.
- */
-function interruptChildren(parentPid: number): void {
-	try {
-		const output = execSync(`pgrep -P ${parentPid}`, { encoding: "utf-8", timeout: 5000 });
-		for (const line of output.trim().split("\n")) {
-			const pid = parseInt(line, 10);
-			if (pid > 0) {
-				try { process.kill(pid, "SIGINT"); } catch { /* already exited */ }
-			}
-		}
-	} catch { /* pgrep unavailable or no children — nothing to interrupt */ }
-}
-
-/**
- * Stall detection thresholds — two levels:
+ * Spawn an agent subprocess for the given task.
  *
- * Soft: interrupt the agent's next tool call via the enforcement extension
- *       (agent stays alive, gets guidance to change approach)
- * Hard: kill the process (caller retries with enriched context)
- */
-export const STALL_SOFT_IDENTICAL_CALLS = 5;
-export const STALL_HARD_IDENTICAL_CALLS = 10;
-export const STALL_SOFT_CONSECUTIVE_ERRORS = 8;
-export const STALL_HARD_CONSECUTIVE_ERRORS = 14;
-
-export interface StallInfo {
-	reason: string;
-	recentActivity: string[];
-}
-
-export interface SubagentResult {
-	exitCode: number;
-	stdout: string;
-	stderr: string;
-	timedOut?: boolean;
-	stall?: StallInfo;
-	/** Infrastructure errors detected in tool output (connection refused, etc.) */
-	infraErrors?: string[];
-}
-
-/**
- * Spawn a pi subprocess for the given agent.
- *
- * Looks for agent definitions in:
- * 1. The package's own agents/ directory
- * 2. The global ~/.pi/agent/agents/ directory
- *
- * Monitors the JSON event stream for stall patterns:
- * - Same tool called with identical args N times → stuck in a loop
- * - N consecutive tool errors → unable to make progress
- *
- * Two-level response:
- * 1. Soft interrupt (5 identical / 8 errors): writes a signal file that
- *    the enforcement extension picks up — blocks the next tool call with
- *    guidance to change approach. Agent stays alive.
- * 2. Hard kill (10 identical / 14 errors): kills the process. Caller
- *    retries with enriched context.
- *
- * Also enforces a hard timeout (default: 10 minutes) as a backstop.
+ * Delegates to the configured runner (pi or Claude Code).
+ * The runner is selected via PI_WAVE_RUNTIME env var or auto-detection.
  */
 export function runSubagent(
 	agentName: string,
@@ -675,323 +605,53 @@ export function runSubagent(
 	fileRules?: FileAccessRules,
 	timeoutMs?: number,
 	logFile?: string,
-	/** Extra lines for the log header (task ID, title, etc.) */
 	logContext?: string[],
-): Promise<SubagentResult> {
-	return new Promise((resolve) => {
-		const args = ["--mode", "json", "-p", "--no-session"];
+): Promise<import("../runner/types.js").RunnerResult> {
+	// Write log header if logFile is specified
+	if (logFile) {
+		try {
+			fs.mkdirSync(path.dirname(logFile), { recursive: true });
+			const header = [
+				`# Task Log: ${agentName}`,
+				`Started: ${new Date().toISOString()}`,
+				...(logContext || []),
+				`---`,
+				``,
+			].join("\n");
+			fs.writeFileSync(logFile, header, "utf-8");
+		} catch { /* best effort */ }
+	}
 
-		// Resolve package root for bundled resources
-		const packageRoot = path.join(__dirname, "..", "..");
-
-		// Look for agent definitions: first in package dir, then in global agents dir
-		const packageAgentsDir = path.join(packageRoot, "agents");
-		const globalAgentsDir = path.join(os.homedir(), ".pi", "agent", "agents");
-		const agentFile = fs.existsSync(path.join(packageAgentsDir, `${agentName}.md`))
-			? path.join(packageAgentsDir, `${agentName}.md`)
-			: path.join(globalAgentsDir, `${agentName}.md`);
-		if (fs.existsSync(agentFile)) {
-			args.push("--append-system-prompt", agentFile);
-		}
-
-		// Stall signal file — bridge between parent (detector) and child (enforcement extension)
-		const stallSignalFile = path.join(os.tmpdir(), `pi-wave-stall-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.signal`);
-
-		// Generate and load file access enforcement extension (with stall signal support)
-		let enforcement: { filePath: string; dir: string } | null = null;
-		if (fileRules) {
-			enforcement = writeEnforcementExtension(
-				cwd,
-				agentName + "-" + Math.random().toString(36).slice(2, 8),
-				fileRules,
-				stallSignalFile,
-			);
-			args.push("-e", enforcement.filePath);
-		}
-
-		args.push(`Task: ${task}`);
-
-		let stdout = "";
-		let stderr = "";
-		let lineBuffer = "";
-		let resolved = false;
-		let timedOut = false;
-		let stall: StallInfo | undefined;
-
-		// ── Per-task log file ──
-		let logFd: number | null = null;
-		const logStartTime = Date.now();
+	const runner = createRunner();
+	const startTime = Date.now();
+	return runner.spawn({
+		agentName,
+		systemPrompt: "",
+		task,
+		cwd,
+		signal,
+		fileRules,
+		timeoutMs,
+	}).then((result) => {
+		// Append result summary to log file
 		if (logFile) {
 			try {
-				fs.mkdirSync(path.dirname(logFile), { recursive: true });
-				logFd = fs.openSync(logFile, "w");
-				fs.writeSync(logFd, `=== Agent: ${agentName} | pi-wave v${VERSION} ===\n`);
-				if (logContext) {
-					for (const line of logContext) fs.writeSync(logFd, `${line}\n`);
+				const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+				const summary = [
+					``,
+					`---`,
+					`Elapsed: ${elapsed}s`,
+					`Exit code: ${result.exitCode}`,
+					result.timedOut ? `TIMED OUT` : "",
+					result.stall ? `STALLED: ${result.stall.reason}` : "",
+				].filter(Boolean).join("\n");
+				fs.appendFileSync(logFile, summary + "\n", "utf-8");
+				// Also write stdout for debugging
+				if (result.stdout) {
+					fs.appendFileSync(logFile, `\n## Raw Output\n\`\`\`\n${result.stdout.slice(0, 50000)}\n\`\`\`\n`, "utf-8");
 				}
-				fs.writeSync(logFd, `Started: ${new Date().toISOString()}\n`);
-				fs.writeSync(logFd, `CWD: ${cwd}\n\n`);
 			} catch { /* best effort */ }
 		}
-
-		function logLine(text: string): void {
-			if (!logFd) return;
-			const elapsed = ((Date.now() - logStartTime) / 1000).toFixed(1);
-			try { fs.writeSync(logFd, `[${elapsed}s] ${text}\n`); } catch { /* ignore */ }
-		}
-
-		function closeLog(exitCode: number): void {
-			if (!logFd) return;
-			try {
-				const elapsed = ((Date.now() - logStartTime) / 1000).toFixed(1);
-				fs.writeSync(logFd, `\nFinished: ${new Date().toISOString()} (${elapsed}s)\n`);
-				fs.writeSync(logFd, `Exit code: ${exitCode}${timedOut ? " (timed out)" : ""}${stall ? " (stalled)" : ""}\n`);
-				fs.closeSync(logFd);
-			} catch { /* ignore */ }
-			logFd = null;
-		}
-
-		// ── Stall detection state ──
-		let consecutiveErrors = 0;
-		let softInterruptSent = false;
-		let doctorInvoked = false;
-		const callCounts = new Map<string, number>();
-		const recentActivity: string[] = [];
-		const recentErrors: string[] = [];
-
-		function summarizeArgs(toolArgs: any): string {
-			if (!toolArgs) return "";
-			if (toolArgs.command) return toolArgs.command.slice(0, 120);
-			if (toolArgs.path) return toolArgs.path;
-			return JSON.stringify(toolArgs).slice(0, 120);
-		}
-
-		/**
-		 * Check for stall patterns. Returns:
-		 * - "soft": write signal file (agent gets interrupted on next tool call)
-		 * - "hard": kill the process (caller retries)
-		 * - null: no stall
-		 */
-		function checkStall(event: any): { level: "soft" | "hard"; reason: string } | null {
-			if (event.type === "tool_execution_start") {
-				const summary = `${event.toolName}(${summarizeArgs(event.args)})`;
-				recentActivity.push(summary);
-				if (recentActivity.length > 15) recentActivity.shift();
-
-				const key = `${event.toolName}:${JSON.stringify(event.args ?? {})}`;
-				const count = (callCounts.get(key) ?? 0) + 1;
-				callCounts.set(key, count);
-
-				if (count >= STALL_HARD_IDENTICAL_CALLS) {
-					return { level: "hard", reason: `${event.toolName} called ${count} times with identical arguments` };
-				}
-				if (count >= STALL_SOFT_IDENTICAL_CALLS && !softInterruptSent) {
-					return { level: "soft", reason: `${event.toolName} called ${count} times with identical arguments` };
-				}
-			}
-
-			if (event.type === "tool_execution_end") {
-				if (event.isError) {
-					consecutiveErrors++;
-					if (consecutiveErrors >= STALL_HARD_CONSECUTIVE_ERRORS) {
-						return { level: "hard", reason: `${consecutiveErrors} consecutive tool errors` };
-					}
-					if (consecutiveErrors >= STALL_SOFT_CONSECUTIVE_ERRORS && !softInterruptSent) {
-						return { level: "soft", reason: `${consecutiveErrors} consecutive tool errors` };
-					}
-				} else {
-					consecutiveErrors = 0;
-				}
-			}
-
-			return null;
-		}
-
-		// ── Process ──
-		const proc = spawn("pi", args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
-
-		// ── Hanging tool detection ──
-		// A single bash command that never returns (dev server, accidental
-		// docker-compose up, etc). We kill its child process, not the agent.
-		let hangingToolTimer: ReturnType<typeof setTimeout> | undefined;
-		let hangingToolCommand: string | undefined;
-
-		const cleanup = () => {
-			if (enforcement) cleanupEnforcement(enforcement.filePath, enforcement.dir);
-			// Clean up stall signal file
-			try { fs.unlinkSync(stallSignalFile); } catch { /* ignore */ }
-			clearTimeout(hangingToolTimer);
-			clearTimeout(timer);
-		};
-
-		proc.stdout.on("data", (data) => {
-			const chunk = data.toString();
-			stdout += chunk;
-
-			// Parse JSON lines incrementally for stall detection
-			lineBuffer += chunk;
-			const lines = lineBuffer.split("\n");
-			lineBuffer = lines.pop() || "";
-
-			for (const line of lines) {
-				if (!line.trim()) continue;
-				try {
-					const event = JSON.parse(line);
-
-					// ── Log events to per-task file ──
-					if (logFd) {
-						if (event.type === "tool_execution_start") {
-							const argSummary = summarizeArgs(event.args);
-							logLine(`TOOL ${event.toolName}(${argSummary})`);
-						} else if (event.type === "tool_execution_end") {
-							if (event.isError) {
-								const errOutput = (event.output || event.error || "").toString().slice(0, 500);
-								logLine(`ERROR ${errOutput}`);
-							} else {
-								// Log first few lines of tool output for read/bash
-								const output = (event.output || "").toString();
-								if (output && output.length > 0) {
-									const preview = output.split("\n").slice(0, 10).join("\n");
-									if (preview.trim()) {
-										logLine(`OUTPUT (${output.split("\n").length} lines):`);
-										for (const ol of preview.split("\n")) {
-											try { fs.writeSync(logFd!, `       ${ol}\n`); } catch { /* ignore */ }
-										}
-										if (output.split("\n").length > 10) {
-											try { fs.writeSync(logFd!, `       ... (truncated)\n`); } catch { /* ignore */ }
-										}
-									}
-								}
-							}
-						} else if (event.type === "message_end" && event.message?.role === "assistant") {
-							for (const part of event.message.content || []) {
-								if (part.type === "text" && part.text) {
-									const preview = part.text.slice(0, 500);
-									logLine(`AGENT: ${preview}${part.text.length > 500 ? "..." : ""}`);
-								}
-							}
-						}
-					}
-
-					// ── Hanging tool timer ──
-					if (event.type === "tool_execution_start" && event.toolName === "bash") {
-						hangingToolCommand = (event.args?.command ?? event.input?.command ?? "").slice(0, 120);
-						clearTimeout(hangingToolTimer);
-						hangingToolTimer = setTimeout(() => {
-							// Kill the child process (the bash command), not the agent
-							interruptChildren(proc.pid);
-							// Write signal file so the agent gets guidance on its next tool call
-							if (enforcement) {
-								try {
-									fs.writeFileSync(stallSignalFile,
-										`bash command running for ${HANGING_TOOL_TIMEOUT_MS / 60000} minutes without completing: "${hangingToolCommand}". ` +
-										`This appears to be a long-running or never-returning command (like a dev server). ` +
-										`Do NOT re-run it. If you need to start a server, use a background process or skip it.`,
-										"utf-8");
-								} catch { /* best effort */ }
-							}
-						}, HANGING_TOOL_TIMEOUT_MS);
-					}
-					if (event.type === "tool_execution_end") {
-						clearTimeout(hangingToolTimer);
-						hangingToolCommand = undefined;
-					}
-
-					// ── Infrastructure error collection ──
-					if (event.type === "tool_execution_end" && event.isError) {
-						const errText = (event.output || event.error || "").toString().toLowerCase();
-						recentErrors.push(errText.slice(0, 500));
-						if (recentErrors.length > 10) recentErrors.shift();
-					}
-
-					// ── Pattern-based stall detection ──
-					const stallResult = checkStall(event);
-					if (stallResult && !timedOut) {
-						if (stallResult.level === "soft" && enforcement) {
-							// Soft interrupt: write signal file, enforcement extension blocks next tool call
-							softInterruptSent = true;
-							try {
-								fs.writeFileSync(stallSignalFile, stallResult.reason, "utf-8");
-							} catch { /* best effort */ }
-						} else if (stallResult.level === "hard" || (stallResult.level === "soft" && !enforcement)) {
-							// Hard kill: no enforcement extension or soft interrupt didn't help
-							if (!stall) {
-								stall = { reason: stallResult.reason, recentActivity: [...recentActivity] };
-								killProc();
-							}
-						}
-					}
-				} catch {
-					/* not JSON, skip */
-				}
-			}
-		});
-		proc.stderr.on("data", (data) => {
-			stderr += data.toString();
-		});
-
-		// Detect infrastructure errors in collected error output
-		const INFRA_PATTERNS = [
-			/connection refused/i,
-			/could not connect to server/i,
-			/no such host/i,
-			/password authentication failed/i,
-			/database .* does not exist/i,
-			/role .* does not exist/i,
-		];
-		function getInfraErrors(): string[] | undefined {
-			const matched = recentErrors.filter(e => INFRA_PATTERNS.some(p => p.test(e)));
-			return matched.length >= 2 ? matched : undefined;
-		}
-
-		proc.on("close", (code) => {
-			if (resolved) return;
-			resolved = true;
-			const exitCode = stall ? 125 : timedOut ? 124 : (code ?? 1);
-			closeLog(exitCode);
-			cleanup();
-			resolve({
-				exitCode,
-				stdout,
-				infraErrors: getInfraErrors(),
-				stderr: timedOut
-					? `Task timed out after ${Math.round((timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS) / 1000)}s\n${stderr}`
-					: stall
-						? `Agent stalled: ${stall.reason}\n${stderr}`
-						: stderr,
-				timedOut,
-				stall,
-			});
-		});
-		proc.on("error", () => {
-			if (resolved) return;
-			resolved = true;
-			closeLog(1);
-			cleanup();
-			resolve({ exitCode: 1, stdout, stderr: stderr || "Failed to spawn pi" });
-		});
-
-		// Kill helper — SIGTERM then SIGKILL after 5s
-		const killProc = () => {
-			proc.kill("SIGTERM");
-			setTimeout(() => {
-				if (!proc.killed) proc.kill("SIGKILL");
-			}, 5000);
-		};
-
-		// External abort signal (user cancellation)
-		if (signal) {
-			if (signal.aborted) killProc();
-			else signal.addEventListener("abort", killProc, { once: true });
-		}
-
-		// Per-task timeout (backstop)
-		const effectiveTimeout = timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS;
-		const timer = effectiveTimeout > 0
-			? setTimeout(() => {
-				timedOut = true;
-				killProc();
-			}, effectiveTimeout)
-			: undefined;
+		return result;
 	});
 }

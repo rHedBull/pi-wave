@@ -16,6 +16,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { createRunner } from "../runner/index.js";
 import { validatePlan, validatePlanComprehensive } from "./dag.js";
 import { runWaveExecution } from "./execution-runner.js";
 import {
@@ -160,6 +161,48 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// ── /waves-runtime ──────────────────────────────────────────────
+
+	function runtimeLabel(): string {
+		const runner = createRunner();
+		const name = runner.constructor.name;
+		if (name === "ClaudeCodeRunner") return "claude";
+		if (name === "PiRunner") return "pi";
+		return "unknown";
+	}
+
+	/** Append runtime tag to a status string, e.g. "⚡ Wave 1" → "⚡ Wave 1 [claude]" */
+	function withRuntime(theme: any, status: string): string {
+		return status + " " + theme.fg("dim", `[${runtimeLabel()}]`);
+	}
+
+	pi.registerCommand("waves-runtime", {
+		description: "Show or switch the agent runtime: /waves-runtime [pi|claude]",
+		handler: async (args, ctx) => {
+			const arg = args?.trim().toLowerCase();
+
+			if (arg === "pi" || arg === "claude") {
+				process.env.PI_WAVE_RUNTIME = arg;
+				const label = runtimeLabel();
+				ctx.ui.notify(`Runtime switched to: ${label}`, "success");
+				ctx.ui.setStatus("waves-runtime", ctx.ui.theme.fg("dim", `[${label}]`));
+				return;
+			}
+
+			if (arg && arg !== "") {
+				ctx.ui.notify(`Unknown runtime "${arg}". Use: /waves-runtime pi  or  /waves-runtime claude`, "error");
+				return;
+			}
+
+			// Show current runtime
+			const label = runtimeLabel();
+			const envVal = process.env.PI_WAVE_RUNTIME;
+			const source = envVal ? `PI_WAVE_RUNTIME=${envVal}` : "auto-detected";
+			ctx.ui.notify(`Current runtime: ${label} (${source})`, "info");
+			ctx.ui.setStatus("waves-runtime", ctx.ui.theme.fg("dim", `[${label}]`));
+		},
+	});
+
 	// ── /waves-spec ─────────────────────────────────────────────────
 
 	pi.registerCommand("waves-spec", {
@@ -188,7 +231,7 @@ export default function (pi: ExtensionAPI) {
 			ensureProjectDir(ctx.cwd, projectName);
 
 			// Phase 1: Scout
-			ctx.ui.setStatus("waves", ctx.ui.theme.fg("warning", `🔍 [${projectName}] Scouting...`));
+			ctx.ui.setStatus("waves", withRuntime(ctx.ui.theme, ctx.ui.theme.fg("warning", `🔍 [${projectName}] Scouting...`)));
 			const scoutDepth = scope === "hack" ? "Quick" : scope === "enterprise" ? "Thorough" : "Medium";
 			const enterpriseExtra = scope === "enterprise"
 				? `\n\nIMPORTANT — Enterprise mode: In addition to standard scouting, you MUST also:\n- Identify and propose specific integration points: exact files, functions, interfaces, and classes where new code should hook into existing code\n- Map the dependency graph around the affected area: what depends on this code, what does it depend on\n- Flag legacy code that may need replacing, wrapping, or deprecating\n- Note existing abstractions/interfaces that new code should implement or extend\n- Include a section "## Proposed Integration Points" in your output listing each point with file path, function/class, and how to integrate`
@@ -291,7 +334,7 @@ export default function (pi: ExtensionAPI) {
 			const relSpec = path.relative(ctx.cwd, spec);
 
 			// Phase 1: Run planner for outline only
-			ctx.ui.setStatus("waves", ctx.ui.theme.fg("warning", `📋 [${projectName}] Drafting outline...`));
+			ctx.ui.setStatus("waves", withRuntime(ctx.ui.theme, ctx.ui.theme.fg("warning", `📋 [${projectName}] Drafting outline...`)));
 
 			const outlineTask = `Read the spec at \`${relSpec}\` and produce a **plan outline only** — NOT the full plan.${extra}
 

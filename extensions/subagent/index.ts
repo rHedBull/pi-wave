@@ -12,12 +12,13 @@
  * Uses JSON mode to capture structured output from subagents.
  */
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Message } from "@mariozechner/pi-ai";
+import type { RuntimeType } from "../runner/types.js";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { type ExtensionAPI, getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
@@ -229,6 +230,91 @@ function writePromptToTempFile(agentName: string, prompt: string): { dir: string
 	return { dir: tmpDir, filePath };
 }
 
+// ── Runtime detection ──────────────────────────────────────────────
+
+const PI_TOOL_TO_CLAUDE: Record<string, string> = {
+	read: "Read", write: "Write", edit: "Edit", bash: "Bash",
+	grep: "Grep", find: "Glob", ls: "LS",
+};
+
+function detectRuntime(): RuntimeType {
+	const envVal = process.env.PI_WAVE_RUNTIME;
+	if (envVal === "pi" || envVal === "claude") return envVal;
+	try {
+		execFileSync("which", ["claude"], { encoding: "utf-8", timeout: 5000, stdio: "pipe" });
+		return "claude";
+	} catch {
+		return "pi";
+	}
+}
+
+function buildRuntimeArgs(runtime: RuntimeType, agent: AgentConfig): { binary: string; args: string[] } {
+	if (runtime === "claude") {
+		const args: string[] = ["--output-format", "stream-json", "-p", "--verbose"];
+		if (agent.model) args.push("--model", agent.model);
+		if (agent.tools && agent.tools.length > 0) {
+			args.push("--allowedTools", agent.tools.map((t) => PI_TOOL_TO_CLAUDE[t] ?? t).join(","));
+		}
+		if (agent.permissionMode === "fullAuto") {
+			args.push("--dangerously-skip-permissions");
+		}
+		return { binary: "claude", args };
+	}
+
+	const args: string[] = ["--mode", "json", "-p", "--no-session"];
+	if (agent.model) args.push("--model", agent.model);
+	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+	if (agent.permissionMode) args.push("--permission-mode", agent.permissionMode);
+	return { binary: "pi", args };
+}
+
+/**
+ * Process a Claude Code stream-json event line and extract message data.
+ * Returns a Message if this event completes a message, null otherwise.
+ */
+function processClaudeEvent(event: any): { message: Message; isAssistant: boolean } | null {
+	// Claude Code emits { type: "assistant", message: {...} } for assistant turns
+	if (event.type === "assistant" && event.message) {
+		const content: any[] = [];
+		if (event.message.content) {
+			for (const block of event.message.content) {
+				if (block.type === "text") content.push({ type: "text", text: block.text });
+				else if (block.type === "tool_use") content.push({ type: "toolCall", name: block.name, arguments: block.input });
+			}
+		}
+		return {
+			message: {
+				role: "assistant",
+				content,
+				usage: event.message.usage ? {
+					input: event.message.usage.input_tokens || 0,
+					output: event.message.usage.output_tokens || 0,
+					cacheRead: event.message.usage.cache_read_input_tokens || 0,
+					cacheWrite: event.message.usage.cache_creation_input_tokens || 0,
+					totalTokens: (event.message.usage.input_tokens || 0) + (event.message.usage.output_tokens || 0),
+					cost: { total: 0 },
+				} : undefined,
+				model: event.message.model,
+				stopReason: event.message.stop_reason,
+			} as Message,
+			isAssistant: true,
+		};
+	}
+
+	// Claude Code emits { type: "tool_result", content: "...", tool: {name} }
+	if (event.type === "tool_result") {
+		return {
+			message: {
+				role: "tool",
+				content: [{ type: "text", text: typeof event.content === "string" ? event.content : JSON.stringify(event.content) }],
+			} as Message,
+			isAssistant: false,
+		};
+	}
+
+	return null;
+}
+
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
 async function runSingleAgent(
@@ -258,10 +344,8 @@ async function runSingleAgent(
 		};
 	}
 
-	const args: string[] = ["--mode", "json", "-p", "--no-session"];
-	if (agent.model) args.push("--model", agent.model);
-	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
-	if (agent.permissionMode) args.push("--permission-mode", agent.permissionMode);
+	const runtime = detectRuntime();
+	const { binary, args } = buildRuntimeArgs(runtime, agent);
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
@@ -299,7 +383,7 @@ async function runSingleAgent(
 		let wasAborted = false;
 
 		const exitCode = await new Promise<number>((resolve) => {
-			const proc = spawn("pi", args, { cwd: cwd ?? defaultCwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+			const proc = spawn(binary, args, { cwd: cwd ?? defaultCwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
 			let buffer = "";
 
 			const processLine = (line: string) => {
@@ -311,6 +395,7 @@ async function runSingleAgent(
 					return;
 				}
 
+				// pi JSON mode events
 				if (event.type === "message_end" && event.message) {
 					const msg = event.message as Message;
 					currentResult.messages.push(msg);
@@ -336,6 +421,33 @@ async function runSingleAgent(
 				if (event.type === "tool_result_end" && event.message) {
 					currentResult.messages.push(event.message as Message);
 					emitUpdate();
+				}
+
+				// Claude Code stream-json events
+				if (runtime === "claude") {
+					const parsed = processClaudeEvent(event);
+					if (parsed) {
+						currentResult.messages.push(parsed.message);
+						if (parsed.isAssistant) {
+							currentResult.usage.turns++;
+							const usage = parsed.message.usage;
+							if (usage) {
+								currentResult.usage.input += usage.input || 0;
+								currentResult.usage.output += usage.output || 0;
+								currentResult.usage.cacheRead += usage.cacheRead || 0;
+								currentResult.usage.cacheWrite += usage.cacheWrite || 0;
+								currentResult.usage.cost += usage.cost?.total || 0;
+								currentResult.usage.contextTokens = usage.totalTokens || 0;
+							}
+							if (!currentResult.model && (parsed.message as any).model) {
+								currentResult.model = (parsed.message as any).model;
+							}
+							if ((parsed.message as any).stopReason) {
+								currentResult.stopReason = (parsed.message as any).stopReason;
+							}
+						}
+						emitUpdate();
+					}
 				}
 			};
 

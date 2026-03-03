@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Container, Text } from "@mariozechner/pi-tui";
+import { createRunner } from "../runner/index.js";
 import {
 	advanceToWave,
 	completedTaskIds,
@@ -42,6 +43,20 @@ export interface RunConfig {
 	pi: ExtensionAPI;
 	/** The command context (for ui.setWidget, ui.setStatus, ui.theme, cwd) */
 	ctx: any;
+}
+
+// ── Runtime label ──────────────────────────────────────────────────
+
+function runtimeLabel(): string {
+	const runner = createRunner();
+	const name = runner.constructor.name;
+	if (name === "ClaudeCodeRunner") return "claude";
+	if (name === "PiRunner") return "pi";
+	return "unknown";
+}
+
+function withRuntime(theme: any, status: string): string {
+	return status + " " + theme.fg("dim", `[${runtimeLabel()}]`);
 }
 
 // ── Runner ─────────────────────────────────────────────────────────
@@ -107,7 +122,7 @@ export async function runWaveExecution(cfg: RunConfig): Promise<void> {
 		];
 
 		advanceToWave(execState, wi);
-		ctx.ui.setStatus("waves", ctx.ui.theme.fg("accent", `⚡ ${waveLabel}${resumeTag}`));
+		ctx.ui.setStatus("waves", withRuntime(ctx.ui.theme, ctx.ui.theme.fg("accent", `⚡ ${waveLabel}${resumeTag}`)));
 		log(`## ${waveLabel}`);
 
 		// Progress tracking
@@ -340,7 +355,7 @@ export async function runWaveExecution(cfg: RunConfig): Promise<void> {
 	const statusMsg = allPassed
 		? ctx.ui.theme.fg("success", `✅ ${isResume ? "Resume" : "Done"} — ${totalCompleted} tasks`)
 		: ctx.ui.theme.fg("error", `❌ ${isResume ? "Resume stopped" : "Stopped"} — wave ${startWave + waveResults.length} failed. /waves-continue to retry`);
-	ctx.ui.setStatus("waves", statusMsg);
+	ctx.ui.setStatus("waves", withRuntime(ctx.ui.theme, statusMsg));
 	setTimeout(() => ctx.ui.setStatus("waves", undefined), 15000);
 }
 
