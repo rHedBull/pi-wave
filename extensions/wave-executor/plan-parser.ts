@@ -20,10 +20,12 @@ import type { Feature, Plan, Task, Wave } from "./types.js";
 
 export function parsePlanV2(markdown: string): Plan {
 	const lines = markdown.split("\n");
-	const plan: Plan = { goal: "", dataSchemas: "", waves: [] };
+	const plan: Plan = { goal: "", dataSchemas: "", projectStructure: "", environment: "", waves: [] };
 
-	// Extract ## Data Schemas section (everything between ## Data Schemas and the next ## heading)
+	// Extract plan-level sections
 	plan.dataSchemas = extractDataSchemas(markdown);
+	plan.projectStructure = extractPlanSection(markdown, "Project Structure");
+	plan.environment = extractPlanSection(markdown, "Environment");
 
 	// Detect format: if any line starts with "### Feature:" or "### Foundation" or "### Integration", it's the new format
 	const hasFeatureHeaders = lines.some(
@@ -289,7 +291,7 @@ export function parsePlanV2(markdown: string): Plan {
 
 export function parsePlanLegacy(markdown: string): Plan {
 	const lines = markdown.split("\n");
-	const plan: Plan = { goal: "", dataSchemas: "", waves: [] };
+	const plan: Plan = { goal: "", dataSchemas: "", projectStructure: "", environment: "", waves: [] };
 
 	// Extract ## Data Schemas section if present
 	plan.dataSchemas = extractDataSchemas(markdown);
@@ -471,6 +473,41 @@ export function parsePlanLegacy(markdown: string): Plan {
 }
 
 // ── Data Schemas Extraction ────────────────────────────────────────
+
+/**
+ * Extract a named ## section from a plan's Markdown.
+ *
+ * Returns the full content between `## <sectionName>` and the next `## ` heading
+ * (or `---` separator). Returns empty string if not found.
+ */
+export function extractPlanSection(markdown: string, sectionName: string): string {
+	const lines = markdown.split("\n");
+	let capturing = false;
+	const captured: string[] = [];
+	const headerRegex = new RegExp(`^## ${sectionName}`, "i");
+
+	for (const line of lines) {
+		if (headerRegex.test(line.trim())) {
+			capturing = true;
+			captured.push(line);
+			continue;
+		}
+
+		if (capturing) {
+			// Stop at the next ## heading (but not ### subsections)
+			if (/^## (?!#)/.test(line) && !headerRegex.test(line)) {
+				break;
+			}
+			// Also stop at --- separator (typically before Wave sections)
+			if (line.trim() === "---") {
+				break;
+			}
+			captured.push(line);
+		}
+	}
+
+	return captured.join("\n").trim();
+}
 
 /**
  * Extract the ## Data Schemas section from a plan's Markdown.

@@ -203,6 +203,15 @@ tests/
 ## TDD Approach
 Brief: framework, patterns.
 
+## Environment
+Provide explicit environment details so agents don't waste tokens discovering these:
+- Language/runtime version (e.g., Python 3.12, Node 20)
+- How to run tests (exact command, e.g., \`cd backend && python -m pytest tests/ -v\`)
+- How to start the dev server (if applicable)
+- Package manager and install command
+- Known quirks or version-specific issues (e.g., "httpx 0.28+ requires ASGITransport")
+- Virtual environment activation (if applicable)
+
 ---
 
 ## Wave 1: <Milestone Name>

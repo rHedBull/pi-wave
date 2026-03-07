@@ -48,6 +48,10 @@ export interface WaveExecutorOptions {
 	specContent: string;
 	/** Complete data schemas section from the plan — passed verbatim to every agent. */
 	dataSchemas: string;
+	/** Project directory tree — injected into every task prompt to prevent orientation flailing. */
+	projectStructure: string;
+	/** Environment hints (versions, test commands, quirks) — injected into every task prompt. */
+	environment: string;
 	protectedPaths: string[];
 	cwd: string;
 	maxConcurrency: number;
@@ -73,6 +77,8 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 		waveNum,
 		specContent,
 		dataSchemas,
+		projectStructure,
+		environment,
 		protectedPaths,
 		cwd,
 		maxConcurrency,
@@ -147,7 +153,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 						: undefined;
 
 					const tLogFile = taskLogDir ? taskLogFile(taskLogDir, task.id, task.agent) : undefined;
-					const result = await runTaskOnBase(task, cwd, specContent, dataSchemas, protectedPaths, signal,
+					const result = await runTaskOnBase(task, cwd, specContent, dataSchemas, projectStructure, environment, protectedPaths, signal,
 						(t, reason) => onStallRetry?.("foundation", t, reason), foundationFiles, tLogFile);
 					let taskResult: TaskResult = { ...result, durationMs: Date.now() - start };
 
@@ -246,6 +252,8 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 						waveNum,
 						specContent,
 						dataSchemas,
+						projectStructure,
+						environment,
 						protectedPaths,
 						cwd,
 						maxConcurrency: perFeatureConcurrency,
@@ -340,7 +348,7 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 						: undefined;
 
 					const tLogFile = taskLogDir ? taskLogFile(taskLogDir, task.id, task.agent) : undefined;
-					const result = await runTaskOnBase(task, cwd, specContent, dataSchemas, protectedPaths, signal,
+					const result = await runTaskOnBase(task, cwd, specContent, dataSchemas, projectStructure, environment, protectedPaths, signal,
 						(t, reason) => onStallRetry?.("integration", t, reason), allWaveFiles, tLogFile);
 					let taskResult: TaskResult = { ...result, durationMs: Date.now() - start };
 
@@ -369,6 +377,8 @@ export async function executeWave(opts: WaveExecutorOptions): Promise<WaveResult
 							cwd,
 							specContent,
 							dataSchemas,
+							projectStructure,
+							environment,
 							protectedPaths,
 							signal,
 						);
@@ -425,6 +435,8 @@ async function runTaskOnBase(
 	cwd: string,
 	specContent: string,
 	dataSchemas: string,
+	projectStructure: string,
+	environment: string,
 	protectedPaths: string[],
 	signal?: AbortSignal,
 	onStallRetry?: (task: Task, reason: string) => void,
@@ -438,6 +450,13 @@ async function runTaskOnBase(
 	const schemasBlock = dataSchemas
 		? `\n## Data Schemas (authoritative — use these exact names)\n${dataSchemas}\n`
 		: "";
+	const structureBlock = projectStructure
+		? `\n## Project Structure\n${projectStructure}\n`
+		: "";
+	const envBlock = environment
+		? `\n## Environment\n${environment}\n`
+		: "";
+	const contextBlocks = `${structureBlock}${envBlock}${schemasBlock}`;
 
 	let agentTask: string;
 
@@ -446,7 +465,7 @@ async function runTaskOnBase(
 			? `\n## Required Files (MUST ALL EXIST)\nThese files should have been created by prior tasks in this wave. Verify EVERY one exists before running tests:\n${allWaveFiles.map(f => `- \`${f}\``).join("\n")}\n`
 			: "";
 		agentTask = `You are verifying completed work.
-${schemasBlock}
+${contextBlocks}
 ## Spec Reference
 ${specContext}
 
@@ -461,10 +480,11 @@ IMPORTANT — verify in this order:
 2. **Syntax/compilation** — run the compiler/linter. If it fails, report "fail".
 3. **Tests** — run the test suite. If tests fail, report "fail".
 4. **Completeness** — verify the implementation matches the task descriptions.
-- Do NOT modify any files`;
+- Do NOT modify any files
+- Work continuously — do NOT stop to summarize progress or wait for feedback`;
 	} else if (agentName === "test-writer") {
 		agentTask = `You are writing tests.
-${schemasBlock}
+${contextBlocks}
 ## Spec Reference
 ${specContext}
 
@@ -477,14 +497,15 @@ ${task.description}
 IMPORTANT:
 - Only create/modify TEST files listed for this task
 - Follow existing test patterns
-- Use exact field names, column names, and type names from the Data Schemas section above`;
+- Use exact field names, column names, and type names from the Data Schemas section above
+- Work continuously — do NOT stop to summarize progress or wait for feedback`;
 	} else {
 		const testContext =
 			task.testFiles.length > 0
 				? `\nTests to satisfy: ${task.testFiles.join(", ")}\nYour implementation MUST make these tests pass.`
 				: "";
 		agentTask = `You are implementing code.
-${schemasBlock}
+${contextBlocks}
 ## Spec Reference
 ${specContext}
 
@@ -497,7 +518,8 @@ ${task.description}
 IMPORTANT:
 - Only modify files listed for this task
 - Follow the spec requirements exactly
-- Use exact field names, column names, and type names from the Data Schemas section above — they are authoritative and override any names in the spec`;
+- Use exact field names, column names, and type names from the Data Schemas section above — they are authoritative and override any names in the spec
+- Work continuously — do NOT stop to summarize progress or wait for feedback`;
 	}
 
 	// File access rules
@@ -593,6 +615,8 @@ async function runIntegrationFixCycle(
 	cwd: string,
 	specContent: string,
 	dataSchemas: string,
+	projectStructure: string,
+	environment: string,
 	protectedPaths: string[],
 	signal?: AbortSignal,
 ): Promise<Omit<TaskResult, "durationMs"> | null> {
@@ -622,7 +646,7 @@ Fix the issues and ensure all tests pass.`;
 	});
 
 	// Re-verify (no stall callback — this is already inside a fix cycle)
-	const reResult = await runTaskOnBase(verifierTask, cwd, specContent, dataSchemas, protectedPaths, signal, undefined, allFiles);
+	const reResult = await runTaskOnBase(verifierTask, cwd, specContent, dataSchemas, projectStructure, environment, protectedPaths, signal, undefined, allFiles);
 
 	let passed = reResult.exitCode === 0;
 	if (!passed) {

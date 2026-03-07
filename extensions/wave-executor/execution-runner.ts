@@ -210,6 +210,8 @@ export async function runWaveExecution(cfg: RunConfig): Promise<void> {
 			waveNum: wi + 1,
 			specContent,
 			dataSchemas: plan.dataSchemas,
+			projectStructure: plan.projectStructure,
+			environment: plan.environment,
 			protectedPaths,
 			cwd,
 			maxConcurrency,
