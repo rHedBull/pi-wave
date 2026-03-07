@@ -544,6 +544,11 @@ export default function (pi) {
 		if (toolName === "subagent") {
 			return { block: true, reason: "BLOCKED: subagent calls are not allowed in wave tasks. If you are blocked on an environment issue, report it and move on — the executor will handle it." };
 		}
+
+		// Block TodoWrite — wave server tracks progress externally, internal todo tracking wastes tokens
+		if (toolName === "TodoWrite" || toolName === "todowrite" || toolName === "todo_write") {
+			return { block: true, reason: "BLOCKED: TodoWrite is disabled for wave tasks. The wave executor tracks your progress externally. Just do the work directly without maintaining a todo list." };
+		}
 	});
 }
 `;

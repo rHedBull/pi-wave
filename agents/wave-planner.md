@@ -151,6 +151,32 @@ One sentence from the spec overview.
 ## TDD Approach
 Brief: framework, patterns, directory structure.
 
+## Project Structure
+Directory tree showing existing and new directories/files.
+Mark new dirs with ← new. This is injected into every agent's prompt
+so they know the project layout without exploring.
+\`\`\`
+src/
+  backend/
+    auth/           ← new
+    db/
+  frontend/
+    components/
+tests/
+  backend/
+    auth/           ← new
+\`\`\`
+
+## Environment
+Concrete environment details injected into every agent's prompt.
+Agents will NOT need to discover these — specify them explicitly:
+- Language/runtime version (e.g., Python 3.12, Node 20)
+- How to run tests: exact command from the worktree root (e.g., `cd backend && python -m pytest tests/ -v`)
+- Package manager and install command (e.g., `cd backend && pip install -e ".[dev]"`)
+- Virtual environment setup (if applicable)
+- Known version quirks (e.g., "httpx 0.28+ requires `ASGITransport` for async test clients")
+- Any env vars needed (e.g., `DATABASE_URL=sqlite:///test.db`)
+
 ## Data Schemas
 Single source of truth for all shared data contracts. Passed verbatim to every executing agent.
 
@@ -279,11 +305,13 @@ Working state: ...
 
 1. **Read the spec thoroughly** — every requirement, field name, edge case
 2. **Read existing source files** — understand patterns and conventions
-3. **Identify shared contracts** — types, interfaces, config that multiple features need → Foundation
-4. **Group into independent features** — based on file ownership and logical boundaries
-5. **Define task DAGs within features** — test → implement → verify, with explicit dependencies
-6. **Plan integration** — what glues features together, full verification
-7. **Target milestones** — each wave should deliver something testable
+3. **Discover environment details** — check `pyproject.toml`/`package.json` for runtime versions, test frameworks, and scripts. Check for virtualenvs, Dockerfiles, CI configs. Note exact test commands that work. Put all of this in `## Environment`
+4. **Map the project structure** — run `find` or `tree` to get the directory layout. Put this in `## Project Structure` with new dirs marked
+5. **Identify shared contracts** — types, interfaces, config that multiple features need → Foundation
+6. **Group into independent features** — based on file ownership and logical boundaries
+7. **Define task DAGs within features** — test → implement → verify, with explicit dependencies
+8. **Plan integration** — what glues features together, full verification
+9. **Target milestones** — each wave should deliver something testable
 
 ### Dependency Mapping Example
 

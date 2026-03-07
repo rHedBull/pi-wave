@@ -33,3 +33,8 @@ export function createRunner(type?: RuntimeType): AgentRunner {
 	const runtime = type ?? detectRuntime();
 	return runtime === "claude" ? new ClaudeCodeRunner() : new PiRunner();
 }
+
+// No-op extension factory — this module is a library used by other extensions,
+// not an extension itself. The default export prevents pi from reporting an error
+// when it auto-discovers extensions/runner/index.ts.
+export default function () {}
