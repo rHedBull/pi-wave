@@ -114,6 +114,14 @@ export class PiRunner implements AgentRunner {
 			const callCounts = new Map<string, number>();
 			const recentActivity: string[] = [];
 
+			// Error detection state — pi CLI in JSON mode always exits 0,
+			// even on fatal errors (rate limits, auth failures, server errors, etc.)
+			// We track error signals from the event stream to override exit code.
+			let lastStopReason: string | undefined;
+			let lastErrorMessage: string | undefined;
+			let retryExhausted = false;  // auto_retry_end with success=false
+			let hasAssistantOutput = false;  // any actual text output produced
+
 			function checkStall(event: any): { level: "soft" | "hard"; reason: string } | null {
 				if (event.type === "tool_execution_start") {
 					const summary = `${event.toolName}(${summarizeArgs(event.args)})`;
@@ -176,6 +184,42 @@ export class PiRunner implements AgentRunner {
 					try {
 						const event = JSON.parse(line);
 
+						// Track error signals from pi's event stream
+						if (event.type === "message_end" && event.message?.role === "assistant") {
+							lastStopReason = event.message.stopReason;
+							lastErrorMessage = event.message.errorMessage;
+							// Check if this message has actual text output
+							if (Array.isArray(event.message.content)) {
+								for (const part of event.message.content) {
+									if (part.type === "text" && part.text?.trim()) {
+										hasAssistantOutput = true;
+									}
+								}
+							}
+						}
+						if (event.type === "agent_end") {
+							// Check final message in agent_end for errors
+							const msgs = event.messages;
+							if (Array.isArray(msgs) && msgs.length > 0) {
+								const lastMsg = msgs[msgs.length - 1];
+								if (lastMsg?.role === "assistant") {
+									lastStopReason = lastMsg.stopReason;
+									lastErrorMessage = lastMsg.errorMessage;
+									if (Array.isArray(lastMsg.content)) {
+										for (const part of lastMsg.content) {
+											if (part.type === "text" && part.text?.trim()) {
+												hasAssistantOutput = true;
+											}
+										}
+									}
+								}
+							}
+						}
+						if (event.type === "auto_retry_end" && event.success === false) {
+							retryExhausted = true;
+							if (event.finalError) lastErrorMessage = event.finalError;
+						}
+
 						// Hanging tool timer
 						if (event.type === "tool_execution_start" && event.toolName === "bash") {
 							hangingToolCommand = (event.args?.command ?? event.input?.command ?? "").slice(0, 120);
@@ -227,14 +271,36 @@ export class PiRunner implements AgentRunner {
 				if (resolved) return;
 				resolved = true;
 				cleanup();
+
+				let effectiveExitCode = stall ? 125 : timedOut ? 124 : (code ?? 1);
+				let effectiveStderr = timedOut
+					? `Task timed out after ${Math.round((config.timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS) / 1000)}s\n${stderr}`
+					: stall
+						? `Agent stalled: ${stall.reason}\n${stderr}`
+						: stderr;
+
+				// pi CLI in JSON mode always exits 0, even on fatal errors.
+				// Detect error conditions and override exit code.
+				if (effectiveExitCode === 0) {
+					if (retryExhausted) {
+						// All retries exhausted (rate limits, server errors, connection errors, etc.)
+						effectiveExitCode = 1;
+						effectiveStderr = `API error — retries exhausted: ${lastErrorMessage || "unknown error"}\n${effectiveStderr}`;
+					} else if (lastStopReason === "error") {
+						// Final message was an error (auth failure, context overflow, etc.)
+						effectiveExitCode = 1;
+						effectiveStderr = `Agent error: ${lastErrorMessage || "unknown error"}\n${effectiveStderr}`;
+					} else if (!hasAssistantOutput) {
+						// Process exited 0 but produced no text output at all — something went wrong
+						effectiveExitCode = 1;
+						effectiveStderr = `Agent produced no output\n${effectiveStderr}`;
+					}
+				}
+
 				resolve({
-					exitCode: stall ? 125 : timedOut ? 124 : (code ?? 1),
+					exitCode: effectiveExitCode,
 					stdout,
-					stderr: timedOut
-						? `Task timed out after ${Math.round((config.timeoutMs ?? DEFAULT_TASK_TIMEOUT_MS) / 1000)}s\n${stderr}`
-						: stall
-							? `Agent stalled: ${stall.reason}\n${stderr}`
-							: stderr,
+					stderr: effectiveStderr,
 					timedOut,
 					stall,
 				});

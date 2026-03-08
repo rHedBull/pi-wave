@@ -11,6 +11,12 @@ export interface Plan {
 	/** Complete data schemas section from the plan — SQL DDL, shared types, API signatures.
 	 *  Passed verbatim to every executing agent as the single source of truth for naming. */
 	dataSchemas: string;
+	/** Project directory tree showing existing and new directories/files.
+	 *  Injected into every task prompt so agents know the project layout without exploring. */
+	projectStructure: string;
+	/** Environment hints: Python/Node version, test commands, known quirks.
+	 *  Injected into every task prompt so agents don't waste tokens discovering these. */
+	environment: string;
 	waves: Wave[];
 }
 

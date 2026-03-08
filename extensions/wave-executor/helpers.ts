@@ -544,6 +544,11 @@ export default function (pi) {
 		if (toolName === "subagent") {
 			return { block: true, reason: "BLOCKED: subagent calls are not allowed in wave tasks. If you are blocked on an environment issue, report it and move on — the executor will handle it." };
 		}
+
+		// Block TodoWrite — wave server tracks progress externally, internal todo tracking wastes tokens
+		if (toolName === "TodoWrite" || toolName === "todowrite" || toolName === "todo_write") {
+			return { block: true, reason: "BLOCKED: TodoWrite is disabled for wave tasks. The wave executor tracks your progress externally. Just do the work directly without maintaining a todo list." };
+		}
 	});
 }
 `;
@@ -654,4 +659,24 @@ export function runSubagent(
 		}
 		return result;
 	});
+}
+
+// ── Error Classification ───────────────────────────────────────────
+
+/**
+ * Detect whether a task failure was caused by API rate limiting or transient server errors.
+ * The PiRunner sets descriptive stderr messages when it detects these conditions from
+ * the JSON event stream (since pi CLI in JSON mode always exits 0).
+ *
+ * Matches:
+ * - "API error — retries exhausted: 429 rate_limit_error: ..."  (PiRunner stderr)
+ * - "API error — retries exhausted: overloaded_error: ..."       (PiRunner stderr)
+ * - "API error — retries exhausted: 502 Bad Gateway"             (PiRunner stderr)
+ * - "API error — retries exhausted: 529 ..."                     (PiRunner stderr)
+ * - Any stderr containing rate limit / overloaded patterns       (Claude Code runner)
+ */
+export function isApiRateLimitError(stderr: string): boolean {
+	if (!stderr) return false;
+	return /retries exhausted.*(?:rate.?limit|overloaded|429|502|503|529)/i.test(stderr)
+		|| /(?:rate.?limit|too many requests|overloaded).+error/i.test(stderr);
 }

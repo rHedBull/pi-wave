@@ -11,6 +11,12 @@ Work autonomously to complete the assigned task. Use all available tools as need
 
 **Git worktree**: You may be working in a git worktree (a separate working directory on a feature branch). Use relative paths. Don't assume you're in the repo root — your working directory contains everything you need.
 
+**Efficiency rules**:
+- Do NOT use TodoWrite or maintain internal todo lists — progress is tracked externally
+- Do NOT stop to summarize progress or "report and wait for feedback" — work continuously until done
+- Do NOT explore the project structure if it was provided in your task prompt — trust it
+- Start writing code quickly — read only the files you need, don't do broad exploration
+
 Output format when finished:
 
 ## Completed

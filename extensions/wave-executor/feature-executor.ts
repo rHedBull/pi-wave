@@ -21,6 +21,7 @@ import {
 	checkDeclaredFiles,
 	extractFinalOutput,
 	extractSpecSections,
+	isApiRateLimitError,
 	runSubagent,
 	taskLogFile,
 } from "./helpers.js";
@@ -42,6 +43,10 @@ export interface FeatureExecutorOptions {
 	specContent: string;
 	/** Complete data schemas section from the plan — passed verbatim to every agent. */
 	dataSchemas: string;
+	/** Project directory tree — injected into every task prompt to prevent orientation flailing. */
+	projectStructure: string;
+	/** Environment hints (versions, test commands, quirks) — injected into every task prompt. */
+	environment: string;
 	protectedPaths: string[];
 	cwd: string; // fallback cwd if no worktree
 	maxConcurrency: number;
@@ -66,6 +71,8 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 		waveNum,
 		specContent,
 		dataSchemas,
+		projectStructure,
+		environment,
 		protectedPaths,
 		cwd,
 		maxConcurrency,
@@ -168,7 +175,7 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 					: undefined;
 
 				const tLogFile = taskLogDir ? taskLogFile(taskLogDir, task.id, task.agent) : undefined;
-				const result = await runSingleTask(task, taskCwd, specContent, dataSchemas, protectedPaths, signal, onStallRetry, featureFiles, tLogFile);
+				const result = await runSingleTask(task, taskCwd, specContent, dataSchemas, projectStructure, environment, protectedPaths, signal, onStallRetry, featureFiles, tLogFile);
 				const elapsed = Date.now() - start;
 
 				let taskResult: TaskResult = {
@@ -201,6 +208,8 @@ export async function executeFeature(opts: FeatureExecutorOptions): Promise<Feat
 						taskCwd,
 						specContent,
 						dataSchemas,
+						projectStructure,
+						environment,
 						protectedPaths,
 						signal,
 					);
@@ -259,6 +268,8 @@ async function runSingleTask(
 	cwd: string,
 	specContent: string,
 	dataSchemas: string,
+	projectStructure: string,
+	environment: string,
 	protectedPaths: string[],
 	signal?: AbortSignal,
 	onStallRetry?: (task: Task, reason: string) => void,
@@ -272,11 +283,18 @@ async function runSingleTask(
 	const schemasBlock = dataSchemas
 		? `\n## Data Schemas (authoritative — use these exact names)\n${dataSchemas}\n`
 		: "";
+	const structureBlock = projectStructure
+		? `\n## Project Structure\n${projectStructure}\n`
+		: "";
+	const envBlock = environment
+		? `\n## Environment\n${environment}\n`
+		: "";
+	const contextBlocks = `${structureBlock}${envBlock}${schemasBlock}`;
 	let agentTask: string;
 
 	if (agentName === "test-writer") {
 		agentTask = `You are writing tests as part of a TDD implementation plan.
-${schemasBlock}
+${contextBlocks}
 ## Spec Reference
 ${specContext}
 
@@ -294,13 +312,14 @@ IMPORTANT:
 - Follow existing test patterns in the project
 - Do not touch implementation files
 - Use exact field names, column names, and type names from the Data Schemas section above
-- You may be working in a git worktree. Use relative paths.`;
+- You may be working in a git worktree. Use relative paths.
+- Work continuously — do NOT stop to summarize progress or wait for feedback`;
 	} else if (agentName === "wave-verifier") {
 		const featureFilesBlock = allFeatureFiles && allFeatureFiles.length > 0
 			? `\n## Required Files (MUST ALL EXIST)\nThese files should have been created by prior tasks. Verify EVERY one exists before running tests:\n${allFeatureFiles.map(f => `- \`${f}\``).join("\n")}\n`
 			: "";
 		agentTask = `You are verifying completed work.
-${schemasBlock}
+${contextBlocks}
 ## Spec Reference
 ${specContext}
 
@@ -317,14 +336,15 @@ IMPORTANT — verify in this order:
 3. **Tests** — run the test suite. If tests fail, report "fail".
 4. **Completeness** — verify the implementation matches the task descriptions (correct types, methods, signatures).
 - Do NOT modify any files — only read and run checks
-- If working in a git worktree, run tests relative to the worktree root`;
+- If working in a git worktree, run tests relative to the worktree root
+- Work continuously — do NOT stop to summarize progress or wait for feedback`;
 	} else {
 		const testContext =
 			task.testFiles.length > 0
 				? `\nTests to satisfy: ${task.testFiles.join(", ")}\nYour implementation MUST make these tests pass.`
 				: "";
 		agentTask = `You are implementing code as part of a TDD plan. Tests may have already been written — your job is to make them pass.
-${schemasBlock}
+${contextBlocks}
 ## Spec Reference
 ${specContext}
 
@@ -342,7 +362,8 @@ IMPORTANT:
 - Follow the spec requirements exactly
 - Use exact field names, column names, and type names from the Data Schemas section above — they are authoritative and override any names in the spec
 - Do not touch files outside your task scope
-- You may be working in a git worktree. Use relative paths.`;
+- You may be working in a git worktree. Use relative paths.
+- Work continuously — do NOT stop to summarize progress or wait for feedback`;
 	}
 
 	// Build file access rules
@@ -387,6 +408,22 @@ IMPORTANT:
 		].join("\n");
 		// Retry appends to the same log file
 		result = await runSubagent(agentName, agentTask + stallContext, cwd, signal, fileRules, undefined, logFile, [`${logCtx[0]} (stall retry)`, ...logCtx.slice(1)]);
+	}
+
+	// API rate-limit retry: if the agent was rate-limited, wait with exponential backoff and retry.
+	// Pi's internal retries use short delays (2s base); this handles sustained rate limiting
+	// with longer waits (60s, 120s, 240s) to let the API quota recover.
+	if (result.exitCode !== 0 && isApiRateLimitError(result.stderr)) {
+		const API_RETRY_DELAYS = [60_000, 120_000, 240_000]; // 1min, 2min, 4min
+		for (let attempt = 0; attempt < API_RETRY_DELAYS.length; attempt++) {
+			if (signal?.aborted) break;
+			const delay = API_RETRY_DELAYS[attempt];
+			console.error(`⏳ Task "${task.title}" hit API rate limit. Waiting ${delay / 1000}s before retry ${attempt + 1}/${API_RETRY_DELAYS.length}...`);
+			await new Promise((r) => setTimeout(r, delay));
+			if (signal?.aborted) break;
+			result = await runSubagent(agentName, agentTask, cwd, signal, fileRules, undefined, logFile, [`${logCtx[0]} (rate-limit retry ${attempt + 1})`, ...logCtx.slice(1)]);
+			if (result.exitCode === 0 || !isApiRateLimitError(result.stderr)) break;
+		}
 	}
 
 	// Doctor retry: if worker hit infrastructure errors, invoke doctor then retry
@@ -437,6 +474,8 @@ async function runFixCycle(
 	cwd: string,
 	specContent: string,
 	dataSchemas: string,
+	projectStructure: string,
+	environment: string,
 	protectedPaths: string[],
 	signal?: AbortSignal,
 ): Promise<Omit<TaskResult, "durationMs"> | null> {
@@ -466,7 +505,7 @@ Fix the issues and ensure all tests pass. Use exact names from Data Schemas abov
 
 	// Re-run verifier (with feature files context)
 	const allFeatureFiles = feature.tasks.filter(t => t.agent !== "wave-verifier").flatMap(t => t.files);
-	const reResult = await runSingleTask(verifierTask, cwd, specContent, dataSchemas, protectedPaths, signal, undefined, allFeatureFiles);
+	const reResult = await runSingleTask(verifierTask, cwd, specContent, dataSchemas, projectStructure, environment, protectedPaths, signal, undefined, allFeatureFiles);
 
 	// Check if re-verification passed
 	let passed = reResult.exitCode === 0;
