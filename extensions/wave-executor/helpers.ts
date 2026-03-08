@@ -655,3 +655,23 @@ export function runSubagent(
 		return result;
 	});
 }
+
+// ── Error Classification ───────────────────────────────────────────
+
+/**
+ * Detect whether a task failure was caused by API rate limiting or transient server errors.
+ * The PiRunner sets descriptive stderr messages when it detects these conditions from
+ * the JSON event stream (since pi CLI in JSON mode always exits 0).
+ *
+ * Matches:
+ * - "API error — retries exhausted: 429 rate_limit_error: ..."  (PiRunner stderr)
+ * - "API error — retries exhausted: overloaded_error: ..."       (PiRunner stderr)
+ * - "API error — retries exhausted: 502 Bad Gateway"             (PiRunner stderr)
+ * - "API error — retries exhausted: 529 ..."                     (PiRunner stderr)
+ * - Any stderr containing rate limit / overloaded patterns       (Claude Code runner)
+ */
+export function isApiRateLimitError(stderr: string): boolean {
+	if (!stderr) return false;
+	return /retries exhausted.*(?:rate.?limit|overloaded|429|502|503|529)/i.test(stderr)
+		|| /(?:rate.?limit|too many requests|overloaded).+error/i.test(stderr);
+}
