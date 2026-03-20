@@ -52,6 +52,7 @@ pi install git:github.com/rHedBull/pi-wave
 | Skill | Description |
 |-------|-------------|
 | **pr-review** | Multi-agent parallel PR review with confidence scoring |
+| **pessimist** | Brutally critical review of specs and plans — finds gaps, unrealistic assumptions, missing edge cases, and architectural risks before you waste time building |
 
 ## Architecture: Feature-Parallel DAG Execution
 
